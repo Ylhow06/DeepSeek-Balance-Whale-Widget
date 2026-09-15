@@ -252,12 +252,20 @@ platform-hours    : 09-15 → 5 时段 / 2.0499（cached）
 | 自定义 API 模型、预算/预警 | 信任栅栏（本地仅绑 127.0.0.1，可接受） |
 | Codex 本地会话统计（读 `$CODEX_HOME` 文件，纯本地不依赖 DSH） | |
 
-## 7. 下一步（方案 B，未做）
+## 7. 下一步（方案 B：Electron 桌面壳）
 
-在 A 之上套 Electron / Tauri 桌面壳：
-- Electron：主进程内嵌/起这个 Node 服务，渲染进程开 `http://127.0.0.1:<port>`；加托盘、置顶、开机自启、单实例锁。
-- 建议：服务端口动态分配（避免 EADDRINUSE），主进程退出时清理子进程。
-- 打包前把 `.dsh-standalone/`、`config.json` 的 key 处理成用户级路径（现在落在项目目录内）。
+> **选型已定，实施文档见 [`HANDOVER-DESKTOP.md`](./HANDOVER-DESKTOP.md)** —— 交给执行 agent 直接照做。
+> 该文档包含：已定决策（Electron 44.3.0 / 全屏透明覆盖层 / 先 node:http+动态端口 / `desktop/` 子目录 / 只主屏）、
+> 已核实的事实与行号、分阶段实施步骤（含代码骨架）、Windows 坑清单、验证命令、安全红线。
+
+要点速览：
+- **不用 Tauri**：其 `set_ignore_cursor_events` 不支持转发鼠标移动（穿透后收不到 `mousemove`，
+  只能轮询烧 CPU），且离线 WebView2 要 +127MB，再加 Node sidecar 反而比 Electron 大。
+- **必须全屏覆盖层**，不能用小精灵窗：挂件的消费记录窗宽 `min(560px,92vw)`、遮罩 `inset:0`、
+  吸附按视口 1/4 分区 —— 小视口会把它们全裁掉。全屏后挂件定位逻辑**零改动**。
+- **端口动态分配**（`listen(0)`）根除 EADDRINUSE；核心 `lib/` 无需改动
+  （所有写盘都从 `DSH_HOME` 派生，主进程把它指到 `userData` 即可）。
+- 穿透开关可直接复用挂件已有的逐像素命中检测 `isWhaleHit()`（`assets/whale-widget.js:13935`，取 PNG alpha）。
 
 ## 8. 约定与记忆
 

@@ -43,6 +43,37 @@ function dshwInit() {
 if (window.__dshWhaleInit) return
 window.__dshWhaleInit = true
 
+// —— 桌面壳集成钩子（附加式，不影响 DSH 内行为）——
+// ⚠️ 必须放在 dshwInit **内部**：isWhaleHit(L13935) / widgetUiHit(L14069) 是 dshwInit
+//    的私有函数，不在 IIFE 顶层作用域。曾放在 IIFE 末尾 → 调用时 ReferenceError →
+//    被调用方的 try/catch 吞成"判定不可用" → 挂件永远穿透、点不动（本机实测 19:23 日志）。
+// 放在函数**开头**是因为两个被调函数都是函数声明（会提升，此刻已可用），
+// 而 dshwInit 后面任一句抛错都不会再影响钩子的注册。
+// 供 desktop/overlay-glue.js 调用：把「光标是否落在鲸鱼/已打开 UI 上」翻译成
+// Electron 覆盖层窗口的鼠标穿透开关。无桌面壳时只是一次函数赋值，零副作用。
+try {
+  window.__dshwHitTest = function (x, y) {
+    var fake = { clientX: x, clientY: y }
+    if (isWhaleHit(fake)) return true
+    // 菜单/面板等已打开的 UI：按 DOM 命中判断。
+    // （挂件根节点是 pointer-events:none，拿不到鲸鱼子元素；
+    //   但菜单/面板自身是 pointer-events:auto，elementFromPoint 能命中。）
+    var el = document.elementFromPoint(x, y)
+    if (!widgetUiHit(el)) return false
+    // 防御：.dshwv-menu-btn 这类元素在隐藏态是 opacity:0 + pointer-events:auto，
+    // 会留下一个「看不见却吃鼠标」的死区（点击既不进挂件也不穿透到桌面）。
+    // 逐级向上确认没有不可见祖先。
+    for (var n = el; n && n !== document.documentElement; n = n.parentElement) {
+      var cs = null
+      try { cs = window.getComputedStyle(n) } catch (err) { break }
+      if (!cs) break
+      if (cs.visibility === 'hidden' || cs.display === 'none') return false
+      if (parseFloat(cs.opacity || '1') <= 0.05) return false
+    }
+    return true
+  }
+} catch (err) {}
+
 var MIN_SCALE = 0.6
 var MAX_SCALE = 2.5
 var STEP = 0.1

@@ -1,0 +1,59 @@
+# ============================================================================
+# electron-builder 打包配置（Phase 3，见 HANDOVER-DESKTOP.md §4）
+# 用法：cd desktop && node scripts/prepare-build.mjs && npx electron-builder --win --config electron-builder.yml
+# （或直接 npm run build）
+# ============================================================================
+
+appId: com.deepseek.whale.desktop
+productName: 小鲸鱼
+copyright: MIT
+
+directories:
+  # 打包 .build/app（由 scripts/prepare-build.mjs 生成的镜像仓库根结构），
+  # 而不是 desktop/ 自己 —— 详见该脚本头部注释
+  app: .build/app
+  output: dist
+  buildResources: build
+
+# app 目录里全是需要的东西，全带上
+files:
+  - "**/*"
+
+# ⚠️ 必须关掉 asar 打包。
+# 原因：主进程里 `await import('../standalone/server.js')` 走的是 **Node 的 ESM loader**，
+# 它用自己的内部 fs 原语读文件，**不经过 Electron 对 fs 的 asar 补丁** →
+# 打包成 app.asar 后动态 import 会读不到文件，表现为双击图标毫无反应（GUI 下 stderr 看不见）。
+# 同类案例：https://github.com/OpenLAIR/dr-claw/commit/fad2976（结论同为 asar: false）。
+# 本应用只有 20 个文件、无 node_modules，关掉 asar 的代价约等于 0。
+asar: false
+compression: normal
+
+win:
+  icon: build/icon.png
+  target:
+    - target: portable
+      arch: [x64]
+    - target: nsis
+      arch: [x64]
+  artifactName: 小鲸鱼-${version}-${arch}.${ext}
+
+portable:
+  artifactName: 小鲸鱼-${version}-便携版.${ext}
+
+nsis:
+  # oneClick: true 时 NSIS 会静默装到默认位置（%LOCALAPPDATA%\Programs\小鲸鱼），
+  # 用户没有选路径这一步。要"自定义安装路径"就必须改成向导式：
+  # allowToChangeInstallationDirectory **只在 oneClick: false 时生效**（官方约束）。
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  # 安装向导会先问"为使用这台电脑的所有用户 / 只为我自己"（因为允许提权），
+  # 之后就是"浏览…"选择安装目录那一步。
+  perMachine: false
+  allowElevation: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: 小鲸鱼
+  runAfterFinish: true
+  artifactName: 小鲸鱼-${version}-安装版.${ext}
+  # 卸载时保留 %APPDATA%\WhaleDesktop（账本/配置），别把用户数据删了
+  deleteAppDataOnUninstall: false

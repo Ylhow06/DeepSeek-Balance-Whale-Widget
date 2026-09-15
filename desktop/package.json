@@ -1,0 +1,23 @@
+{
+  "name": "whale-desktop",
+  "productName": "小鲸鱼",
+  "version": "0.1.0",
+  "private": true,
+  "description": "DeepSeek 小鲸鱼挂件的 Windows 桌面宠物壳（Electron 全屏透明覆盖层）",
+  "type": "module",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "start:soft": "electron . --software-gl",
+    "selftest": "electron . --selftest",
+    "prepare-build": "node scripts/prepare-build.mjs",
+    "check:hook": "node scripts/check-hook.mjs",
+    "build": "node scripts/prepare-build.mjs && electron-builder --win --config electron-builder.yml",
+    "build:portable": "node scripts/prepare-build.mjs && electron-builder --win portable --config electron-builder.yml"
+  },
+  "devDependencies": {
+    "electron": "44.3.0",
+    "electron-builder": "26.15.3",
+    "jsdom": "^30.0.1"
+  }
+}
