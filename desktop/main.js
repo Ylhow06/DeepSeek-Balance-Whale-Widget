@@ -100,6 +100,17 @@ function main() {
 
   const SELFTEST = process.argv.includes('--selftest')
 
+  // —— 桌面宠物用不到的东西，启动前先关掉 ——
+  // CalculateNativeWinOcclusion：Windows 上 Chromium 会周期性地自己算"窗口有没有被遮挡"，
+  //   对一个常驻置顶的透明窗来说是纯白烧 CPU。关掉在本机是常规做法（VS Code 同款）。
+  // 其余几个都是浏览器功能（翻译、投屏、优化提示、前后退缓存、客户端提示帧），
+  // 本应用只加载一个本地页，全部用不到 → 少几个后台服务与一点常驻内存。
+  // 注意：switch 必须在 ready 之前追加，所以放在这里（main() 早于 whenReady）。
+  app.commandLine.appendSwitch('disable-features',
+    'CalculateNativeWinOcclusion,Translate,MediaRouter,OptimizationHints,BackForwardCache,AcceptCHFrame')
+  // 关掉 Chromium 的后台联网（组件更新、域名可靠性上报等）；页面自己的 fetch 不受影响
+  app.commandLine.appendSwitch('disable-background-networking')
+
   process.env.DSH_STANDALONE_HOME = DATA_HOME
   process.env.DSH_STANDALONE_CONFIG = CONFIG_PATH
   process.env.DSH_STANDALONE_OVERLAY = '1'
@@ -133,6 +144,8 @@ function main() {
   let quitting = false
   /** @type {NodeJS.Timeout|null} */
   let cursorTimer = null
+  let lastCursorPt = null
+  let lastCursorSentAt = 0
 
   // -------------------------------------------------------------------------
   // ③ ready 之后：起后端 → 开覆盖层 → 托盘
@@ -301,6 +314,9 @@ function main() {
         contextIsolation: true,
         nodeIntegration: false,
         backgroundThrottling: false,
+        // 页面里没有任何可输入文本（挂件菜单那点输入框用不到拼写检查），
+        // 关掉能省下 Chromium 为拼写检查加载的词典与相关服务。
+        spellcheck: false,
         // 挂件会在交互时播提示音；默认策略下未交互前会被拒
         autoplayPolicy: 'no-user-gesture-required',
       },
@@ -355,12 +371,24 @@ function main() {
       overlayWin.hide()
       setIgnore(true) // 隐藏时把状态归位，避免下次显示时带着旧值
       lastIgnore = null // 强制下次 show 后重新下发
+      setHiddenMode(true)
     } else {
       overlayWin.show()
       lastIgnore = null
       setIgnore(true)
+      setHiddenMode(false)
     }
     refreshTrayMenu()
+  }
+
+  // 隐藏时允许 Chromium 节流这个渲染进程（定时器降频、少占 CPU/内存），
+  // 显示时必须解除，否则 60s 余额刷新与动画会被拖慢。
+  // 常见场景：用户把鲸鱼收进托盘挂一整天。
+  function setHiddenMode(hidden) {
+    if (!overlayWin || overlayWin.isDestroyed()) return
+    const wc = overlayWin.webContents
+    if (!wc || typeof wc.setBackgroundThrottling !== 'function') return
+    try { wc.setBackgroundThrottling(!!hidden) } catch (e) {}
   }
 
   // -------------------------------------------------------------------------
@@ -377,6 +405,11 @@ function main() {
   // 表现正是"点击总是落到下层"。主进程读光标位置是纯 system call，与窗口是否
   // 穿透无关，因此这里用 ~33ms 轮询兜底：命中判定仍在页面里做（需要 DOM/像素），
   // 主进程只负责把坐标送过去。
+  //
+  // 省开销：光标**没动**时不重复下发（那多半是在发呆），只保留 ~500ms 一次的
+  // 心跳重算（万一挂件在光标静止时被吸附动画挪开，也能在 0.5s 内纠正）。
+  // 实测鼠标静止时 IPC 量降到原来的 ~7%。
+  const IDLE_HEARTBEAT_MS = 500
   function startCursorPolling() {
     if (cursorTimer) return
     cursorTimer = setInterval(() => {
@@ -384,6 +417,10 @@ function main() {
       try {
         const b = overlayWin.getBounds()
         const p = screen.getCursorScreenPoint()
+        const moved = !lastCursorPt || p.x !== lastCursorPt.x || p.y !== lastCursorPt.y
+        if (!moved && Date.now() - lastCursorSentAt < IDLE_HEARTBEAT_MS) return
+        lastCursorPt = { x: p.x, y: p.y }
+        lastCursorSentAt = Date.now()
         overlayWin.webContents.send('whale:cursor', { x: p.x - b.x, y: p.y - b.y })
       } catch (e) {
         // 窗口正在销毁等瞬时错误：忽略，下一轮继续

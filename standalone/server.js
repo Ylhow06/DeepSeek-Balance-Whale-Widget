@@ -171,6 +171,10 @@ function buildIndexHtml() {
   const pageBg = OVERLAY_MODE ? 'transparent' : '#f5f6fa'
   // 覆盖层模式额外加载桌面壳胶水（鼠标穿透开关的翻译层）
   const glueTag = OVERLAY_MODE ? '\n<script defer src="' + SHELL_GLUE_ROUTE + '"></script>' : ''
+  // 宿主能力声明：独立模式（含桌面壳）没有 DSH 会话事件流 →
+  // last-turn.json 的 seq 恒为 0，挂件据此不渲染「每轮消耗提示 / 任务结束音效」
+  // 并关掉每秒一次的 last-turn 轮询。必须排在 widget.js 之前。
+  const capsTag = '\n<script>window.__dshwShellCaps={dshSessionEvents:false,host:"standalone"};</script>'
   const tipBlock = OVERLAY_MODE ? '' : `
 <div class="tip">
   <h1>小鲸鱼 · 独立运行</h1>
@@ -207,6 +211,7 @@ function buildIndexHtml() {
 <div id="root" class="fake-root">
   <textarea class="fake-composer" aria-hidden="true" tabindex="-1"></textarea>
 </div>
+${capsTag}
 <script defer src="/dsh-whale/widget.js"></script>${glueTag}
 </body>
 </html>`

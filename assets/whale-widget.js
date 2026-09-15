@@ -89,6 +89,15 @@ var IMG_URL = '/dsh-whale/image.png?v=2'
 var GIF_URL = '/dsh-whale/rua.gif'
 var BUBBLE_URL = '/dsh-whale/bubble.json'
 
+// —— 宿主能力声明 ——
+// 独立模式薄壳 / Electron 桌面壳会在页面里注入 window.__dshwShellCaps；
+// DSH 宿主里没有这个全局 → 视为全功能，行为与以前完全一致。
+// 没有 DSH 会话事件流时，last-turn.json 的 seq 恒为 0，
+// 于是「每轮消耗提示」与「任务结束音效」永远不会触发 —— 与其留着死 UI + 每秒空轮询，
+// 不如直接不渲染这两处、也不启动那个定时器。
+var shellCaps = (window.__dshwShellCaps && typeof window.__dshwShellCaps === 'object') ? window.__dshwShellCaps : null
+var HAS_SESSION_EVENTS = !shellCaps || shellCaps.dshSessionEvents !== false
+
 var css = [
   '.dshwv-root{position:fixed;right:0;bottom:0;--dshw-scale:1;--dshw-base:clamp(122px,calc(min(250px,min(100vw,100vh) * 0.28) * var(--dshw-scale)),625px);width:var(--dshw-base);height:var(--dshw-base);pointer-events:none;user-select:none;-webkit-user-select:none;z-index:9999;font-family:inherit;transition:left .16s ease,top .16s ease,transform .3s ease}',
   // v634 移动端:去掉浏览器「点击高亮」方块——它画在可点元素的矩形包围盒上,
@@ -1236,7 +1245,8 @@ menuBox.appendChild(row1)
 menuBox.appendChild(row2)
 menuBox.appendChild(row3)
 menuBox.appendChild(row6)
-menuBox.appendChild(row7)
+// 每轮消耗提示：只在有 DSH 会话事件流的宿主里才有意义（见 HAS_SESSION_EVENTS）
+if (HAS_SESSION_EVENTS) menuBox.appendChild(row7)
 // 「任务结束音效」不再占主菜单(v720):控件挂在一个不插入文档的宿主上,
 // 「自定义提示」窗口打开时再把它搬进窗口。需要宿主是因为 dshwCustSel 初始化要求 select 已有父节点。
 var taskEndRowHost = document.createElement('div')
@@ -10335,6 +10345,83 @@ var bubbleSwapTimer = null
 var hintFadeTimer = null
 var gifFadeTimer = null
 var lastHintText = null
+
+// —— 内容自适应气泡（把内容等比缩进泡泡形状里）——
+// 背景：文字盒子 .dshwv-text 是 .dshwv-pop 的 66% x 64%，而泡泡主体是一个
+// rx=373 / ry=232 的椭圆（viewBox 1026x700，中心约 454,247）——文字盒子的四角
+// 本来就在椭圆之外：(338.5/373)² + (224/232)² ≈ 1.76 > 1。
+// 所以内容一多（行数多、字大、长文本不换行）就会顶出泡泡轮廓。
+// 做法：内容变化后量一次自然尺寸，解出"外接矩形四角恰好落在椭圆内"的缩放比，
+// 用 CSS 独立属性 scale 整体等比缩回去（不动任何字号、不改子元素、也不碰
+// .dshwv-text 的 transform —— 那个 transform 还要负责居中和左吸附镜像）。
+var bubbleFitK = 1
+var bubbleFitRaf = 0
+var bubbleFitLogged = false
+// 独立变换属性(scale/translate)可用性：两者要一起用，缺一不可
+var CAN_INDIV_TRANSFORM = (function () {
+  try { return !!(window.CSS && CSS.supports && CSS.supports('scale', '0.5') && CSS.supports('translate', '1% 1%')) } catch (err) { return false }
+})()
+function fitBubbleText() {
+  try {
+    var popW = bubbleBox.clientWidth
+    if (!popW) return
+    var u = popW / 1026 // 泡泡坐标系 -> 像素
+    var rx = 373 * u * 0.98 // 主体椭圆半轴（取自 svg path 的 A 373 232），留 2% 余量
+    var ry = 232 * u * 0.98
+    // 量内容自然尺寸：临时松开固定宽高（offset* 是布局值，不受 scale 影响）
+    var prevW = textBox.style.width
+    var prevH = textBox.style.height
+    textBox.style.width = 'auto'
+    textBox.style.height = 'auto'
+    var w = textBox.offsetWidth
+    var h = textBox.offsetHeight
+    textBox.style.width = prevW
+    textBox.style.height = prevH
+    if (!w || !h) return
+    // 要求 (w/2, h/2) 落在椭圆内：(w/2/rx)² + (h/2/ry)² <= 1 → 解出 k
+    var k = 1 / Math.sqrt(Math.pow(w / 2 / rx, 2) + Math.pow(h / 2 / ry, 2))
+    k = Math.max(0.35, Math.min(1, k)) // 下限：再挤也别缩到看不清
+    window.__dshwFitInfo = { w: w, h: h, k: Math.round(k * 1000) / 1000, pop: popW }
+    // 桌面壳里留一条真数据方便调参（DSH 宿主没有这个桥 → 静默跳过）。
+    // 首次必定记一条（证明跑过），之后只在 k 有明显变化时记，避免刷屏。
+    try {
+      var needLog = !bubbleFitLogged || Math.abs(k - bubbleFitK) >= 0.015
+      if (needLog && window.__whaleShell && typeof window.__whaleShell.log === 'function') {
+        bubbleFitLogged = true
+        window.__whaleShell.log('[bubble] fit 自然尺寸 ' + w + 'x' + h + ' → k=' + k.toFixed(3) +
+          '（泡泡宽 ' + popW + 'px，椭圆 ' + Math.round(rx) + 'x' + Math.round(ry) + '）')
+      }
+    } catch (err) {}
+    if (Math.abs(k - bubbleFitK) < 0.015) return
+    bubbleFitK = k
+    if (k >= 0.999) {
+      textBox.style.scale = ''
+      textBox.style.translate = ''
+      return
+    }
+    if (!CAN_INDIV_TRANSFORM) return
+    // ⚠️ 居中补偿（踩过一次）：
+    // scale 是**独立**变换属性，按规范合成顺序是 translate × rotate × scale × transform，
+    // 也就是 scale 作用在 transform 的**外层**。而 .dshwv-text 的 transform 里带着
+    // translate(-50%,-50%) 做居中 —— 这个居中位移会被 scale 一起缩放，
+    // 导致元素中心往右下偏移 (w/2)(1-k)（实测表现为"内容整体往右偏"）。
+    // 用同样位于外层的 translate 反向补偿即可精确抵消；居中与左吸附镜像仍交给 CSS。
+    textBox.style.scale = k.toFixed(3)
+    var comp = (50 * (1 - k)).toFixed(3)
+    textBox.style.translate = '-' + comp + '% -' + comp + '%'
+  } catch (err) {}
+}
+// 合并到下一帧再量：内容刚写完就量会拿到未重排的旧值，且一帧内多次内容更新只量一次
+function scheduleBubbleFit() {
+  try {
+    if (bubbleFitRaf) return
+    bubbleFitRaf = requestAnimationFrame(function () {
+      bubbleFitRaf = 0
+      fitBubbleText()
+    })
+  } catch (err) {}
+}
+
 function setHint(text) {
   // 首次/恢复（lastHintText===null）时直接写文本，不做淡出淡入——否则
   // 气泡打开或按压重开时会先淡出再淡入，造成「消失一下又出现」。
@@ -10660,6 +10747,7 @@ function sceneOpen(kind, renderFn, ttlMs) {
   function finish() {
     try { renderFn() } catch (err) {}
     try { bubbleBox.classList.add('dshwv-pop-open') } catch (err) {}
+    scheduleBubbleFit() // 内容变了就重新适配一次泡泡（见 fitBubbleText）
     // 内容替换(泡泡已开着)时淡入新文字;首次打开不加内联透明度,
     // 文字显隐交给 CSS(.dshwv-pop-open 才显示,带 .36s 延时跟随泡泡成形)
     if (wasOpen) {
@@ -11909,6 +11997,7 @@ function render() {
   } else {
     setHint(hint)
   }
+  scheduleBubbleFit() // 金额/提示行变了，字号可能有变（如 --dshw-u 或行内容）→ 重新适配
   // 注意:不在泡泡显示期间整泡重绘(内容在用户观看时保持稳定);
   // 数值/峰谷等更新由“泡泡消失→下一次显示”时的渲染自然采用最新 state
 }
@@ -14447,7 +14536,9 @@ function pollLastTurn() {
       .catch(function () {})
   } catch (err) {}
 }
-setInterval(pollLastTurn, 1000)
+// 每秒一次的 last-turn 轮询只在有会话事件流的宿主里注册：
+// 独立/桌面模式下该接口的 seq 恒为 0，这个定时器纯属每秒白发一次请求。
+if (HAS_SESSION_EVENTS) setInterval(pollLastTurn, 1000)
 }
 // 主界面检测通过后执行挂件初始化（非主界面时 dshwInit 不会执行）
 if (dshwEnabled) {

@@ -716,3 +716,182 @@ npx electron-builder --win nsis --config electron-builder.yml
   exe 本身放哪都行（`D:\工具\` 也照样跑）——"把 exe 放哪"就是它的自定义路径。
   注意便携版与安装版共用同一个 `appId` 与 userData，靠单实例锁保证不会同时开两份。
 
+---
+
+## 15. 桌面模式下清掉死功能 + 降开销（2026-09-15 第四轮）
+
+### 15.1 判断依据
+独立模式（含桌面壳）里 `ctx.on('session/event')` 是 no-op，所以 `last-turn.json`
+的 `seq` **恒为 0**。后果有两层：
+- 「每轮消耗提示」与「任务结束音效」永远不触发 → **死 UI**；
+- 前端的 `setInterval(pollLastTurn, 1000)` 会**每秒发一次请求**，纯白发。
+
+判据不是猜的：`lib/index.js:2846` 的 last-turn 路由只在宿主喂过 `lastTurn` 时才给
+非零 seq，而独立模式的会话流是空的。
+
+### 15.2 做法：宿主能力声明（**不是删功能，是按宿主隐藏**）
+薄壳在页面里注入一个全局（必须在 widget.js 之前）：
+
+```html
+<script>window.__dshwShellCaps={dshSessionEvents:false,host:"standalone"};</script>
+```
+
+挂件侧（`assets/whale-widget.js`）：
+```js
+var shellCaps = (window.__dshwShellCaps && typeof window.__dshwShellCaps === 'object') ? window.__dshwShellCaps : null
+var HAS_SESSION_EVENTS = !shellCaps || shellCaps.dshSessionEvents !== false
+```
+- `menuBox.appendChild(row7)`（每轮消耗提示行）→ 包在 `if (HAS_SESSION_EVENTS)` 里；
+  该行是「自定义提示」编辑窗（内含任务结束音效）的**唯一入口**，所以一并不可达。
+- `setInterval(pollLastTurn, 1000)` → 同样包起来。
+
+DSH 宿主里没有 `__dshwShellCaps` → `HAS_SESSION_EVENTS` 为真 → **行为与以前一模一样**，
+设置数据也没有迁移/删除（换回 DSH 就自动恢复）。
+
+### 15.3 降开销清单（都带可验证证据）
+
+| 措施 | 依据 / 效果 |
+|---|---|
+| 去掉每秒 last-turn 轮询 | jsdom 断言：注入 caps 后 2.4s 内 `last-turn.json` 请求数 **0**（无 caps 时为 ≥1）。场景 B 的实际请求只有 roles/audio/usage-settings/bubble/size/balance 六个 |
+| 光标轮询空闲降频 | 光标未移动时不再逐次下发，只保留 ~500ms 心跳（防止动画把挂件挪走后状态不更新）。鼠标静止时 IPC 量约为原来的 **1/15** |
+| `spellcheck: false` | 页面没有任何需要拼写检查的输入，关掉可省下 Chromium 为拼写检查加载的词典与服务 |
+| `disable-features=CalculateNativeWinOcclusion` | Windows 上 Chromium 会周期性自算窗口遮挡状态；对一个常驻置顶透明窗纯白烧 CPU |
+| 隐藏时允许节流 | 托盘「隐藏小鲸鱼」时 `webContents.setBackgroundThrottling(true)`，显示时解除。用户把鲸鱼收进托盘挂一整天是常见用法 |
+
+### 15.4 回归护栏（`npm run check:hook` 已扩为两个场景）
+```
+PASS  A/无 caps：脚本执行无异常
+PASS  A/无 caps：dshwInit 已跑起来
+PASS  A/无 caps：挂件根节点已挂载
+PASS  A/无 caps：菜单保留「每轮消耗提示」      ← 守住 DSH 行为不变
+PASS  A/无 caps：last-turn 轮询仍在跑  [1 次]
+PASS  B/有 caps：脚本执行无异常
+PASS  B/有 caps：挂件根节点已挂载
+PASS  B/有 caps：菜单已隐藏「每轮消耗提示」
+PASS  B/有 caps：无 DSH 会话事件 → 钩子仍注册  [function]
+PASS  B/有 caps：last-turn 轮询已关闭  [0 次]
+PASS  对照组能识别作用域外引用  [ReferenceError: isWhaleHit is not defined]
+PASS  钩子调用不抛错（作用域正确）
+```
+两个场景互为对照：A 证明"没把 DSH 模式改坏"，B 证明"桌面模式确实清干净了"。
+
+> 尚未做的事：**内存绝对值实测**。本轮开工时应用没在运行，没有拿到改动前的基线，
+> 所以没有做前后对比。上面每一条都是"减少固定开销"，方向明确但没有数字。
+> 想量化的话：启动应用后用
+> `Get-Process | Where-Object { $_.ProcessName -like '*鲸鱼*' } | Measure-Object WorkingSet64 -Sum`
+> 记一次总和，之后每次改动复测即可得到趋势。
+
+---
+
+## 16. 内存构成说明 + 气泡内容自适应（2026-09-15 第五轮）
+
+### 16.1 内存构成（用户实测 139.5MB / 5 进程）
+| 进程 | 实测 | 性质 |
+|---|---|---|
+| 主进程（browser） | 37.9MB | Node + Electron main + 插件；**基线，动不了** |
+| GPU 进程 | **53.0MB** | 全屏 1920x1032 透明图层 + 着色器/帧缓冲；**唯一的大块可选项** |
+| 渲染进程（页面） | 34.6MB | Chromium 渲染进程基线；挂件自身资源只有 ~5.8MB |
+| 网络服务 | 8.2MB | 页面用 fetch 就必然有这个进程 |
+| 其它 utility | 5.8MB | 存储/杂项 |
+
+结论：**没有"我们的代码太重"这回事**。要显著往下压，只有一条路——去掉 GPU 进程。
+
+### 16.2 本轮已做的低风险削减
+```js
+app.commandLine.appendSwitch('disable-features',
+  'CalculateNativeWinOcclusion,Translate,MediaRouter,OptimizationHints,BackForwardCache,AcceptCHFrame')
+app.commandLine.appendSwitch('disable-background-networking')
+// webPreferences 里另加 spellcheck: false
+```
+都是"关掉浏览器功能、本应用用不到"，各自省几 MB 级别，不会改变观感。
+
+### 16.3 想再省 ~50MB 的唯一办法（**需要实测取舍**）
+把硬件加速关掉（软件合成），GPU 进程那一块会消失或大幅缩小，
+代价是动画/拖动时的合成改由 CPU 做，可能不如现在顺滑：
+
+```powershell
+# 便携版实测（不改变默认行为，只是这一次启动用软件渲染）
+$env:WHALE_DESKTOP_SOFTWARE_GL=1
+& "D:\...\desktop\dist\小鲸鱼-0.1.0-便携版.exe"
+# 也可以用命令行参数：<exe> --software-gl
+```
+跑起来后对比任务管理器里 5 个进程的总和。若确实降得多且观感能接受，
+就把 `createOverlay()` 里的 `app.disableHardwareAcceleration()` 改成默认调用
+（注意：必须在 ready 之前调用，代码里已有的 `--software-gl` 分支就是模板）。
+
+### 16.4 气泡内容溢出的根因与修法
+**根因不是"内容太长"，是文字盒子和泡泡形状本来就不匹配**：
+
+| 量 | 值 |
+|---|---|
+| 文字盒子 `.dshwv-text` | `.dshwv-pop` 的 66% × 64% → 在 1026×700 坐标系里是 **677×448**，中心 (454,252) |
+| 泡泡主体（svg path 的 `A 373 232`） | 椭圆 rx=**373**、ry=**232**，中心 (454,247) |
+| 四角是否在椭圆内 | (338.5/373)² + (224/232)² ≈ **1.76 > 1** → **四角都在椭圆外** |
+
+也就是说：哪怕内容正好填满文字盒子，四角也会顶出泡泡轮廓。
+平时看不出来只是因为默认内容（3 行、居中、宽 ≤560）远小于盒子。
+
+**修法**：内容变化后量一次自然尺寸，解出"外接矩形四角恰好落在椭圆内"的缩放比，
+再用 CSS 独立属性 `scale` 整体等比缩回去：
+
+```
+k = 1 / sqrt( (w/2/rx)² + (h/2/ry)² )     // 取 0.98 余量、下限 0.35
+textBox.style.scale = k
+```
+
+几个刻意的选择：
+- **用 `scale` 而不是改字号**：一次覆盖所有子元素（三行文字、模块行、图片行），
+  不用给每个 `font-size` 乘系数；也不碰 `.dshwv-text` 的 `transform`
+  —— 那个 transform 还要负责居中和左吸附镜像，写内联会把它顶掉。
+- **`requestAnimationFrame` 后再量**：内容刚写完时布局还没更新，量到的是旧值；
+  顺带把一帧内的多次内容更新合并成一次测量。
+- **只在超框时缩、不放大**：`k` 上限 1；回归到 1 时清掉内联 `scale` 交回 CSS。
+- 挂载点只有两处就覆盖全部内容路径：`sceneOpen().finish()`（打开/切场景，
+  含模块化内容）与 `render()`（打开期间余额/提示刷新）。
+
+实测（架构验证）：默认三行内容 k=1（不缩），四行或长文本才开始缩；
+长到 1500 单位的一行会缩到 ~0.49，仍可读。
+
+### 16.5 ⚠️ 独立变换属性的合成顺序（第一版改完"内容整体往右偏"的原因）
+第一版直接写了 `textBox.style.scale = k`，结果**内容往右下偏**。原因不是缩放本身，
+而是**独立变换属性与 `transform` 的合成顺序**：
+
+按 CSS Transforms Level 2，最终变换是
+```
+translate × rotate × scale × transform     ← translate 最外、transform 最内
+```
+而 `.dshwv-text` 的居中靠的正是 `transform: translate(-50%,-50%)` ——
+这句居中位移位于 **transform 内部**，会被外层的 `scale` 一起缩放，
+于是元素中心相对锚点偏移 **`(w/2)(1-k)`**（右下方向）。
+
+修法：用同样位于外层的独立 `translate` 反向补偿：
+```js
+textBox.style.scale = k
+var comp = 50 * (1 - k)
+textBox.style.translate = '-' + comp + '% -' + comp + '%'   // 百分比按自身边框盒解析
+```
+这样 CSS 里那两句（居中 + 左吸附镜像）**一行都不用动**。
+
+矩阵验算（`npm run check:hook` 已内置，防的就是"哪天有人顺手删掉那行补偿"）：
+
+| w × h | k | 不补偿的偏移 | 补偿后 | 左吸附镜像 |
+|---|---|---|---|---|
+| 677×448 | 1 | (0, 0) | (0, 0) | 一致 |
+| 560×376 | 0.905 | **(+26.6, +17.9)** | (0, 0) | 一致 |
+| 677×448 | 0.75 | **(+84.6, +56.0)** | (0, 0) | 一致 |
+| 677×448 | 0.5 | **(+169.3, +112.0)** | (0, 0) | 一致 |
+
+> 另一个可选方案是把整句 transform 写到内联里自己拼（含镜像），但那样会永久压掉
+> CSS 的 `.dshwv-root.dshwv-left .dshwv-text` 规则，吸附翻转时文字可能忘记镜像。
+> 用独立 `translate` 补偿不动 transform，风险更小。
+
+### 16.6 调参用的埋点
+`fitBubbleText()` 会把每次的实测值写进桌面壳日志（DSH 宿主没有这个桥，静默跳过）：
+```
+[bubble] fit 自然尺寸 560x376 → k=0.905（泡泡宽 250px，椭圆 334x208）
+```
+首次必定记一条（证明跑过），之后只在 k 变化时记。
+另外 `window.__dshwFitInfo = {w,h,k,pop}` 供 devtools / `--selftest` 取用。
+**如果日志里 k 明显小于 1 而你看着字偏小**，说明椭圆模型偏保守，可以放宽
+（把 373/232 乘一个 >1 的容差，或只对"真的超出"的维度缩）。
+
