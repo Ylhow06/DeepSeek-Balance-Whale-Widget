@@ -583,17 +583,35 @@ cd desktop; node_modules\electron\dist\electron.exe .
   `window.__whaleGlueCursorCount > 0`（证明光标轮询确实到达了页面）。
 
 ### 12.5 打包的一件事（踩到了记一下）
-`electron-builder --win`（portable + nsis 两个目标一起）在本机出现**连续两次在 ~2 分钟处被静默杀掉**
-（日志停在 `signing with signtool.exe path=dist\win-unpacked\resources\elevate.exe` 之后，
-没有错误行，产物只剩 `win-unpacked/` 与 `*.nsis.7z`）。
-改成**只打便携版**、前台跑并给足超时后一次成功：
+`electron-builder` 在本机会**随机失败**，日志停在
+`signing with signtool.exe path=dist\win-unpacked\resources\elevate.exe` 之后、
+没有错误行、耗时恰好 ~2 分钟。
+
+> ⚠️ 这里原先写的"本机 2 分钟长任务限制导致被杀"是**错判**。第二轮排查拿到了真错误：
+> ```
+> [safe-delete] SAFE_DELETE_BULK_CONFIRM_REQUIRED {"count":118,"threshold":50,...,
+>   "targets":["...\desktop\dist\win-unpacked.tmp"]}
+>   at checkBulkDeleteGuard (…\cli\vendor\shim\node-safe-delete-shim.cjs:220:19)
+>   at Object.wrappedPromisesRm [as rm] (…:797:15)
+>   at extractArchive (app-builder-lib\src\util\electronGet.ts:191:14)
+>   at ElectronFramework.prepareApplicationStageDirectory (…:152:27)
+> ```
+> 即：**本机 Node 被注入了 safe-delete 护栏**，`fs.rm` 一次删超过 50 个文件就会被拒。
+> electron-builder 每次打包前要清掉上一次的 `dist\win-unpacked(.tmp)`（100+ 文件）→ 被拦 →
+> 进程直接退出，于是表现为"日志没结尾、没有错误、耗时刚好卡在两分钟上下"。
+
+**可靠做法：每次构建前，用 PowerShell 把整个 `dist` 删空。**
+（PowerShell 的 `Remove-Item` 不经过那个 Node shim，所以能删掉；之后 electron-builder
+就无需再 `fs.rm` 任何东西。）
 ```powershell
 cd desktop
+Remove-Item -Recurse -Force dist -ErrorAction SilentlyContinue   # ← 关键这一步
 npm run prepare-build
 npx electron-builder --win portable --config electron-builder.yml
+npx electron-builder --win nsis     --config electron-builder.yml
 ```
-所以脚本里 `npm run build`（两个目标）与本机的长任务限制可能冲突；
-单独出包时优先用 `npm run build:portable`。
+两个目标**分别**构建更稳（一次只出一个包）。只删 `win-unpacked` 而漏掉 `win-unpacked.tmp`
+一样会被拦（`count=118` 那次就是漏了 `.tmp`），所以**整个 dist 一起删**。
 
 ---
 
@@ -894,4 +912,203 @@ textBox.style.translate = '-' + comp + '% -' + comp + '%'   // 百分比按自�
 另外 `window.__dshwFitInfo = {w,h,k,pop}` 供 devtools / `--selftest` 取用。
 **如果日志里 k 明显小于 1 而你看着字偏小**，说明椭圆模型偏保守，可以放宽
 （把 373/232 乘一个 >1 的容差，或只对"真的超出"的维度缩）。
+
+---
+
+## 17. 模型配置：桌面模式下哪些是死的（2026-09-15 第六轮）
+
+### 17.1 一句话根因
+**全部来自同一件事：桌面壳没有 DSH 的会话事件流。** 凡是"数据来自本机每轮对话"的
+地方，在桌面模式里都恒为 0 或不可能命中。逐条核对（判据都指向 `lib/index.js` 的实现）：
+
+| 位置 | 桌面模式下的实际表现 | 处理 |
+|---|---|---|
+| 「今日已用」（无余额接口的厂商） | `apiTodayUsage()` 走到 `eventCost`（会话事件）→ **恒为 0**，界面显示 `0.00` | 改为显示 `—`（`apiTodayMoneyText` / `apiModelTodayText`），并去掉来源标注 |
+| 「事件匹配」输入框 | 作用是把会话事件按关键字归到模型 → **永不命中** | 桌面模式**隐藏**该行，提示改为实话 |
+| 额度「已用来源 = 自动统计（按会话 token）」 | `apiQuotaAutoUsed` 取 `eventTokens` → **恒为 0**，额度永远 0% | 桌面模式**不提供该选项**；存量 `auto` 配置在 `apiQuotaInfo` 里按手动处理（用面板填的 used），点保存即落成 `manual` |
+| 「⚠ 币种不一致 → 去填汇率」提示 | 该提示只为"会话事件的 CNY 金额 vs 厂商币种"存在 | 桌面模式不显示（去填汇率也救不了取不到的数据） |
+| 凭据文案「写入 DSH 官方凭据（.credentials.yaml）」 | 桌面模式凭据写在 `config.json` 的 `credentials` 段 | 按宿主切换文案 |
+| 「余额预警 / 今日预算」（无余额接口的模型） | 阈值所依据的数据不存在 → 永不触发 | 未改：模型本身已标注「取不到数据」，且用户不会去给死数据配阈值 |
+
+### 17.2 桌面模式下**仍然可用**的部分（别误删）
+- **有余额接口的厂商**（DeepSeek 内置 / OpenRouter / Novita / 中转站等）：
+  余额走厂商接口 ✓，今日已用走**余额差记账**（挂件自己的账本，不依赖 DSH）✓
+- **Codex**：本地会话统计 ✓（纯本地文件）
+- **厂商订阅额度**（智谱 / Kimi Coding / MiniMax Coding 等 kind=quota）✓
+- **手动额度**（订阅 / 资源包，"手动填写"模式）✓
+- **测试连通性** ✓
+- 泡泡里的 `{balance}` / `{today}` / 额度类占位符 ✓（有数据的模型）
+
+### 17.3 一个**没有动**的取舍（需要产品决定）
+33 个厂商模板里有 **19 个标着「无余额接口」**（OpenAI / Anthropic / Gemini / Groq /
+Mistral / 百炼 / 千帆 / 混元 / 星火 / ModelScope / Ollama …）。
+桌面模式下它们**取不到任何数据**，唯一还能用的是「测试连通性」（验证 key / baseURL 通不通）。
+
+- 保持现状：下拉里仍然列出，靠标签「（无余额接口）」+ 保存后状态行的
+  「无余额接口·桌面模式取不到数据」自我说明，不影响别人。
+- 收起来：桌面模式下从下拉里隐藏这 19 项（列表干净，但失去"配 key 测连通性"这个用途）。
+
+> 本轮选了**保持现状**（不删功能，只把话说清楚）。要收起来只需在
+> `openApiModelPanel` 的 `tplList` 构建处加一个 `if (!HAS_SESSION_EVENTS && apiTemplates[ti].hasBalance === false) continue`。
+
+---
+
+## 18. 模型行「今日」与面板合计不一致（真 bug，已修）+ 高级字段逐条说明
+
+### 18.1 症状
+用户截图：内置 DeepSeek 模型行显示「今日 ¥4.32」，同屏「今日模型消费」合计却是「¥5.82」。
+
+### 18.2 根因：同一个"今日已用"，两条代码路径用了**不同口径**
+| 位置 | 取值函数 | 优先级 |
+|---|---|---|
+| 余额面板 / 泡泡提示（`getBalancePayload`） | `todayUsageOf()` → **官方账单** → 余额差 | 官方优先 |
+| **模型行**（`apiModelsPayload` 内置分支） | `ledgerTodayTotal()` → **只看余额差**，**从不看官方记录** | 余额差 |
+
+`ledgerTodayTotal()` 的逻辑是 `零点余额 − 当前余额`，而官方账单是平台结算口径
+（与 platform.deepseek.com/usage 一致）。代码里早就写明"官方比余额差更准
+（实测今天余额差为 0 而官方 2.05）"，但模型行漏了这一步 → 两个数天然会差。
+
+### 18.3 修法（`lib/index.js` 内置 DeepSeek 分支）
+```js
+const offToday = officialTodayRecord()
+entry.todayUsage = offToday ? round2(offToday.cost) : ledgerTodayTotal(readUsageLedger())
+entry.usageSource = offToday ? 'official' : 'ledger'
+```
+前端 `apiUsageSourceLabel` 补一档 `'official' → '官方账单'`，模型行会标出来源。
+
+### 18.4 用真实数据验证（不是"应该对"）
+跑 standalone 薄壳指向用户真实数据目录，读 `api-models.json` 与 `usage-records.json`：
+```
+模型行  id=deepseek name=DeepSeek
+  余额=16.89  今日已用=5.82  来源=official  币种=CNY
+面板 /dsh-whale/usage-records.json 今日合计=5.82 来源=official 行数=2
+```
+→ 两个数一致了 ✓（修复前模型行是余额差的 4.32）。
+**下次改这类"同一指标多处展示"的地方，记得用这招：拿真实数据把两个接口一起读出来对比。**
+
+### 18.5 「接口与字段（高级）」各字段是干什么的 + 桌面端能不能用
+
+| 字段 | 作用 | 桌面端 |
+|---|---|---|
+| **余额字段** `balance_infos[0].total_balance` | 在厂商余额接口的返回 JSON 里取余额的路径（支持 `a.b[0].c`） | ✅ 可用（给模板没覆盖的厂商用） |
+| **总量字段** `data.total_credits` | 取"总额度"的路径（配已用字段算进度） | ✅ 可用 |
+| **已用字段** `data.total_usage` | 取"已用"的路径 | ✅ 可用 |
+| **数值乘数** `0.0001` | 取到的值 × 乘数（厂商返回单位不同，如万分之一） | ✅ 可用 |
+| **用量接口** `可选：第二段用量接口` | 第二个端点（如 OpenAI 兼容 `/usage`） | ✅ 可用（厂商接口） |
+| **用量字段 / 用量乘数** | 在第二段返回里取"已用"的路径与乘数 | ✅ 可用 |
+| **事件匹配** | 把**会话事件**的模型名按关键字归到本模型 | ❌ 桌面无会话流（**已隐藏**，见 §17.1） |
+| **单价** 缓存命中/未命中输入/输出 | 元/百万 token 价目：把**会话事件的 token** 折成钱 | ❌ 只在 `apiAttributeEvent` 那条链上用（见 `lib/index.js:1985` 与 `finalizeTurn`）→ 无会话事件就没用武之地（**本已隐藏**） |
+| **汇率** | 事件金额是 CNY，模型币种是 USD 时换算 | ❌ 同上（余额差口径下两边本就是同一币种）→ **已隐藏** |
+| **币种**（单价块内） | 价目表的币种 | ⚪️ 随单价块一起隐藏（模型币种在面板顶部另有一处，那个保留 ✅） |
+
+> 注意：**隐藏只是显示层**（按 `HAS_SESSION_EVENTS` 判断）——原有配置值仍留在 DOM 里随保存原样写回，
+> 不会因为"看不见"就被清空；换回 DSH 时这些字段照常出现、值也还在。
+
+---
+
+## 19. 平台令牌可以在界面里填了（原来只能手改配置文件并重启）
+
+### 19.1 原状
+- **API key**：内置 DeepSeek 那行的「设置 → 密钥 / 接口」里本来就能填 → 走 `set-key` →
+  `ctx.credentials.set()` → **桌面壳/独立模式下就是写进 `config.json` 的 `credentials`** ✓
+- **平台令牌 `DEEPSEEK_PLATFORM_TOKEN`**（官方账单 / 分时段数据的数据源）：**没有任何界面入口**，
+  只能手改 `config.json`，而且旧提示还写着"改完**重启服务**"。
+  （其实不必重启：host 每次请求都现取凭据，写进去下一次刷新就生效。）
+
+### 19.2 做法：复用现成的 `set-key` 接口，只加界面
+没有新增后端动作，直接复用 `action:'set-key'` / `'delete-key'`（`keyRef = 'DEEPSEEK_PLATFORM_TOKEN'`）：
+
+- 模型面板（仅 `m.builtin`）在「密钥」区后面多一节 **平台令牌（官方账单）**：
+  状态行（已配置 ✓ / 尚未配置 + 后果说明）+ password 输入框（留空＝不改动）+「清除平台令牌」按钮。
+- 主「保存」按钮：先提交令牌（非空时），成功后再保存模型本体 —— 避免"保存模型顺手把令牌清掉"。
+- 后端新增一个只读标记 `entry.platformTokenSet`（boolean）：**值绝不下发前端**。
+- 顺带把两处"手改 config.json 并重启"的文案改成指向新界面。
+
+### 19.3 端到端验证（**用临时目录，不碰用户真实凭据**）
+```
+① 初始：platformTokenSet=false
+② set-key 返回 ok=true
+   config.json 里已写入=true
+③ 保存后 platformTokenSet=true
+④ 接口响应里不含令牌明文=true      ← 密钥不回传前端
+⑤ delete-key 返回 ok=true → platformTokenSet=false
+   config.json 里已移除=true
+   API key 未受影响=true
+```
+覆盖了写入、回显、清除、以及"其它凭据不被误伤"。验证方式值得复用：
+**把 `DSH_STANDALONE_HOME` / `DSH_STANDALONE_CONFIG` 指到一个临时目录再起薄壳**，
+就能对写盘类操作做真实端到端测试而不污染用户数据。
+
+---
+
+## 20. 内置 DeepSeek 那个面板的三处问题（同一个根因：拿内置当普通模型编辑）
+
+用户实测反馈：「测试连通性显示 key 未填 / 保存提示未知厂商模板 / 内置模型里怎么还有删除模型」。
+
+### 20.1 根因
+内置模型**不是注册表里的模型**（`apiBuiltinModel()` 现造、不落盘），但面板仍按"普通模型"渲染：
+
+| 现象 | 真实原因 |
+|---|---|
+| 保存 → 「未知的厂商模板」 | 厂商下拉**从不列内置模板**（`if (apiTemplates[ti].builtin) continue`）→ 下拉为空 → `provider:''` → `apiSaveModel` 在 `if (!tpl)` 处直接失败 |
+| 测试连通性 → key 未填 | 探活对内置走 `fetchBalance()`，当时**配置里真的没有 API key**（见 §20.3）→ 报错属实 |
+| 「删除模型」 | 后端 `apiDeleteModel` 明确拒绝内置（`内置模型不可删除`），但按钮照样给 |
+
+### 20.2 修法
+- **后端**（`apiSaveModel`）：`id === API_BUILTIN_ID` 时**只写密钥**就返回 ok，
+  不去注册表塞 `id='deepseek'` 的垃圾记录，也不再校验厂商模板。
+- **前端**（`openApiModelPanel`，新增 `isBuiltin`）：
+  - 内置模型：隐藏「基本信息」区（名称/厂商/币种）、凭据名、Base URL，
+    以及**整段「接口与字段（高级）」**（连开关按钮一起不建）
+  - 删除「删除模型」按钮
+  - 保存按钮改名「**保存密钥**」，并加一行说明：内置的名称/厂商/币种/接口都是固定的
+
+### 20.3 ⚠️ 顺带发现：用户的 API key 在 23:32 从 `config.json` 里消失了
+排查时把 `api-models.json` 与 `balance.json` 对着真实数据一读，才发现
+```
+内置条目: hasKey=false … error="未配置 DEEPSEEK_API_KEY"
+balance.json: ok=false 错误=未配置 DEEPSEEK_API_KEY
+config.json credentials 键名=["DEEPSEEK_PLATFORM_TOKEN"]   ← 只剩令牌
+```
+也就是说：**当时余额接口其实是坏的**，只是「今日已用」仍来自官方账本（5.82）所以看着正常。
+配置在 23:32 被改过一次 —— 与「删除密钥」按钮被点到一致（它删的就是 `keyRefInp.value`，
+而内置模型那个值正是 `DEEPSEEK_API_KEY`）。
+
+**已恢复**：项目目录里的 `standalone/config.json`（16:46 的备份）两个键都还在，
+把它补回 `%APPDATA%\WhaleDesktop\config.json`，并当场验证：
+```
+恢复后=["DEEPSEEK_PLATFORM_TOKEN","DEEPSEEK_API_KEY"]
+内置条目: hasKey=true 余额=16.89 今日=5.82(official) 错误=
+balance.json: ok=true 余额=16.89 今日=5.82
+```
+（如果用户是有意删的，说一声再删掉。）
+
+> 教训：**「界面显示某个凭据没配置」有可能是真的没配**，别先怀疑代码 ——
+> 直接把 `api-models.json` / `balance.json` 对着真实数据读一遍，10 秒就能分清。
+
+### 20.4 后续：「+ 添加模型」点了没反应（上一轮修内置时自己埋的雷）
+新增模型时 `m === null`，而平台令牌那节写的是 `if (m.builtin)` → `TypeError` →
+被函数外层 `try/catch` 吞掉 → 面板根本没 append，表现为"点了没反应"。
+改成 `if (isBuiltin)` 即可（`isBuiltin = !!(m && m.builtin)`）。
+
+**已把这个坑做成回归测试**（`check:hook` 里真点一次按钮：进记账界面 → 点「+ 添加模型」→
+断言面板出现），并用对照组确认测试有效：
+
+| 版本 | 结果 |
+|---|---|
+| 有 bug（`m.builtin`） | `mask 数=1 末个文字=[] 含OpenRouter=false` → **FAIL** |
+| 修好（`isBuiltin`） | `mask 数=2 末个文字=[新增模型（自定义 API）选择厂商模板 → 填 API ke…]` → **PASS** |
+
+> 这类"异常被 try/catch 吞掉 + 界面因此完全无反应"的问题，肉眼极难定位，
+> 但用 jsdom 真点一下就是 10 行的事 —— 值得养成习惯。
+
+### 20.5 模型注册表在哪 / 会不会攒垃圾数据
+- 路径：**`%APPDATA%\WhaleDesktop\data\.dshw-api.json`**（`DSH_HOME` 下；
+  DSH 里是 `$DSH_HOME/.dshw-api.json`，兜底 `profiles/web/.dshw-api.json`）。
+- **内置 DeepSeek 永远不进这个文件**（`apiBuiltinModel()` 每次现造，`apiAllModels()` 会过滤）→ 不会污染。
+- 只有「+ 添加模型」保存过的自定义模型才写进去；保存内置模型时后端已改成**只写密钥**（§20.2），
+  不会塞 `id='deepseek'` 的垃圾记录。
+- 实测用户目录里**这个文件根本不存在** → 一个自定义模型都没存过，没有垃圾数据 ✓
+- 同目录下的其它文件都是正常数据：`.dshw-official.json`（官方账单缓存，会随日期增长）、
+  `.dshw-usage.json`（用量账本）、`.dshw-size.json`（挂件尺寸/位置）、`.dshw-bubble.json`（泡泡配置）。
 

@@ -57,7 +57,31 @@ function runWidget(caps) {
 
   // jsdom 缺失的 API 补最小桩
   if (!d.elementFromPoint) d.elementFromPoint = () => null
-  w.fetch = (u) => { calls.push(String(u)); return Promise.reject(new Error('stub fetch')) }
+  w.fetch = (u) => {
+    calls.push(String(u))
+    // api-models.json 要给真结构：模型面板要用它填厂商下拉，
+    // 否则「+ 添加模型」会因拿不到模板而走"先拉取"分支，测试就测不到面板本身了
+    if (String(u).indexOf('api-models.json') !== -1) {
+      return Promise.resolve({
+        ok: true, status: 200,
+        json: () => Promise.resolve({
+          ok: true, builtinId: 'deepseek',
+          models: [{
+            id: 'deepseek', name: 'DeepSeek', provider: 'deepseek', currency: 'CNY',
+            keyRef: 'DEEPSEEK_API_KEY', builtin: true, hasKey: true,
+            balance: 16.89, todayUsage: 5.82, usageSource: 'official', balanceMode: 'api',
+          }],
+          templates: [{
+            id: 'openrouter', name: 'OpenRouter', currency: 'USD', keyRef: 'OPENROUTER_API_KEY',
+            builtin: false, hasBalance: true, needsBaseUrl: false, kind: 'balance',
+            balance: { url: 'https://openrouter.ai/api/v1/credits', auth: 'Bearer {key}', json: { remaining: 'data.total_credits' } },
+            quota: null, matchIds: [], noBalanceApi: false, apiNote: '', sortKey: 'openrouter',
+          }],
+        }),
+      })
+    }
+    return Promise.reject(new Error('stub fetch'))
+  }
   if (!w.matchMedia) {
     w.matchMedia = () => ({ matches: false, addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {} })
   }
@@ -148,6 +172,37 @@ lines.push('（场景 B 实际发出的请求：' + (sample.join(', ') || '无')
   }
   check('不补偿时确实会偏移（说明这个坑存在）', rawShiftSeen)
   check('补偿后中心精确归零（含左吸附镜像）', fixedOk)
+}
+
+// ---------------------------------------- 「+ 添加模型」必须真的能打开面板
+// 踩过一次：面板里写 `if (m.builtin)`，而**新增模型时 m 是 null** → TypeError 被
+// 外层 try/catch 吞掉 → 面板根本没 append（表现为"点添加模型没反应"）。这类错误
+// 在真机上极难看出原因，所以这里用 jsdom 真点一次按钮来兜住。
+{
+  const C = runWidget(null)
+  await sleep(60)
+  const findBtn = (txt) => [...C.d.querySelectorAll('button')].find((b) => (b.textContent || '').indexOf(txt) !== -1)
+  let err = ''
+  try {
+    const usageBtn = findBtn('小鲸鱼记账')
+    if (!usageBtn) throw new Error('没找到记账入口按钮')
+    usageBtn.click()
+    await sleep(60)
+    const addBtn = findBtn('添加模型')
+    if (!addBtn) throw new Error('没找到「+ 添加模型」按钮')
+    addBtn.click()
+    await sleep(80)
+  } catch (e) { err = (e && e.message) || String(e) }
+  check('点「+ 添加模型」不抛错', !err, err || 'ok')
+  const masks = [...C.d.querySelectorAll('.dshwv-usage-mask')]
+  const last = masks.length ? masks[masks.length - 1] : null
+  const cardTxt = last ? (last.textContent || '') : ''
+  const allTxt = C.d.body.textContent || ''
+  lines.push('（诊断：mask 数=' + masks.length + ' 末个文字=[' + cardTxt.slice(0, 30) + '] 含OpenRouter=' +
+    (allTxt.indexOf('OpenRouter') !== -1) + ' 含新增模型=' + (allTxt.indexOf('新增模型') !== -1) + '）')
+  check('新增模型面板确实打开了', allTxt.indexOf('新增模型') !== -1,
+    'mask数=' + masks.length + ' 末个=[' + cardTxt.slice(0, 20) + ']')
+  try { C.w.close() } catch {}
 }
 
 console.log('===== 挂件桌面集成检查（jsdom 离线）=====')

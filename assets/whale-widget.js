@@ -1967,8 +1967,22 @@ function apiFmtMoney(v, cur) {
 function apiUsageSourceLabel(src) {
   var s = String(src || '')
   if (s === 'ledger' || s === 'balance') return '余额差记账'
-  if (s === 'events') return '会话事件'
+  if (s === 'official') return '官方账单'
+  // 桌面壳/独立模式没有 DSH 会话流，'events' 这条路取不到数（值显示为 —），
+  // 再标一个「会话事件」只会让人以为是数据源坏了
+  if (s === 'events') return HAS_SESSION_EVENTS ? '会话事件' : ''
   return ''
+}
+// 自定义模型的「今日已用」展示值。
+// 桌面壳/独立模式 → usageSource==='events' 的模型数据恒为 0，
+// 显示成 0.00 是**误导**（看着像"今天没花钱"），统一显示为 —
+function apiTodayMoneyText(m) {
+  if (!HAS_SESSION_EVENTS && m && m.usageSource === 'events') return '—'
+  return apiFmtMoney(m && m.todayUsage, apiTodayCur(m || {}))
+}
+// 「无余额接口」的说明文案：桌面模式别说成"按会话事件估算"（没有会话事件可用）
+function apiNoBalanceLabel() {
+  return HAS_SESSION_EVENTS ? '无余额接口，按会话事件估算' : '无余额接口·桌面模式取不到数据'
 }
 // 模型列表加载：并发合并 + 失败退避重试 + 失败态可重试。
 // 背景：重启 dsh web 后，浏览器连接池里指向旧实例的连接会立刻失败（一次），
@@ -2151,6 +2165,9 @@ function openApiModelPanel(modelId) {
     }
     var m = isNew ? null : apiModelById(modelId)
     if (!isNew && !m) return
+    // 内置 DeepSeek：它不是注册表里的普通模型，名称/厂商/币种/接口全部固定，
+    // 这个面板对它而言只有「改密钥 / 改平台令牌」两件事（后端 apiSaveModel 同样这么处理）。
+    var isBuiltin = !!(m && m.builtin)
     var mask = document.createElement('div')
     mask.className = 'dshwv-usage-mask'
     mask.style.zIndex = '29000'
@@ -2169,10 +2186,20 @@ function openApiModelPanel(modelId) {
     var status = document.createElement('div')
     status.className = 'dshwv-bubhint'
     status.style.margin = '4px 0 8px'
-    status.textContent = isNew ? '选择厂商模板 → 填 API key → 保存' : (m.error ? ('⚠ ' + m.error) : (m.balanceMode === 'events' ? ('余额 —（无接口·按会话事件）· 今日已用 ' + apiFmtMoney(m.todayUsage, apiTodayCur(m))) : ('余额 ' + apiFmtMoney(m.balance, m.currency) + ' · 今日已用 ' + apiFmtMoney(m.todayUsage, apiTodayCur(m)) + (apiUsageSourceLabel(m.usageSource) ? ('（' + apiUsageSourceLabel(m.usageSource) + '）') : ''))))
+    status.textContent = isNew ? '选择厂商模板 → 填 API key → 保存' : (m.error ? ('⚠ ' + m.error) : (m.balanceMode === 'events' ? ('余额 —（' + apiNoBalanceLabel() + '）· 今日已用 ' + apiTodayMoneyText(m)) : ('余额 ' + apiFmtMoney(m.balance, m.currency) + ' · 今日已用 ' + apiTodayMoneyText(m) + (apiUsageSourceLabel(m.usageSource) ? ('（' + apiUsageSourceLabel(m.usageSource) + '）') : ''))))
     card.appendChild(status)
+    // 内置模型：先说清这个面板能改什么（后面那些"看着像能改"的行会一并收起来）
+    if (isBuiltin) {
+      var btHint = document.createElement('div')
+      btHint.className = 'dshwv-bubhint'
+      btHint.style.margin = '0 0 8px'
+      btHint.textContent = '内置模型：名称 / 厂商 / 币种 / 接口都是固定的，这里只用于配置密钥与平台令牌。'
+      card.appendChild(btHint)
+    }
     // 名称 / 模板 / 币种
-    card.appendChild(apiSec('基本信息'))
+    var basicSec = apiSec('基本信息')
+    if (isBuiltin) basicSec.style.display = 'none'
+    card.appendChild(basicSec)
     var nameInp = apiTextInput(isNew ? '' : m.name, '例如 OpenRouter / 我的中转站')
     card.appendChild(apiPanelRow('名称', nameInp))
     // v726：厂商下拉按「首字母」排序 —— 英文按字母、中文按拼音首字母（host 下发的 sortKey），中英混排 A→Z；
@@ -2211,8 +2238,13 @@ function openApiModelPanel(modelId) {
     // 密钥
     card.appendChild(apiSec('密钥'))
     var keyRefInp = apiTextInput(isNew ? '' : m.keyRef, '凭据名，例如 OPENROUTER_API_KEY')
-    keyRefInp.title = '写入 DSH 官方凭据（.credentials.yaml）时使用的名字'
-    card.appendChild(apiPanelRow('凭据名', keyRefInp))
+    keyRefInp.title = HAS_SESSION_EVENTS
+      ? '写入 DSH 官方凭据（.credentials.yaml）时使用的名字'
+      : '写入本地配置文件 credentials 段时使用的名字'
+    var keyRefRow = apiPanelRow('凭据名', keyRefInp)
+    // 内置模型的凭据名固定就是 DEEPSEEK_API_KEY，改它没有任何作用
+    if (isBuiltin) keyRefRow.style.display = 'none'
+    card.appendChild(keyRefRow)
     var keyInp = document.createElement('input')
     keyInp.type = 'password'
     keyInp.className = 'dshwv-cropname'
@@ -2222,7 +2254,9 @@ function openApiModelPanel(modelId) {
     keyInp.style.height = '26px'
     keyInp.style.boxSizing = 'border-box'
     keyInp.style.textAlign = 'left'
-    keyInp.placeholder = isNew ? '粘贴 API key（保存时写入 DSH 凭据）' : '留空＝不改动现有密钥'
+    keyInp.placeholder = isNew
+      ? (HAS_SESSION_EVENTS ? '粘贴 API key（保存时写入 DSH 凭据）' : '粘贴 API key（保存时写入本地 config.json 的 credentials）')
+      : '留空＝不改动现有密钥'
     card.appendChild(apiPanelRow('API key', keyInp))
     var keyState = document.createElement('div')
     keyState.className = 'dshwv-bubhint'
@@ -2240,9 +2274,45 @@ function openApiModelPanel(modelId) {
     })
     var delKeyRow = apiPanelRow('', delKey)
     card.appendChild(delKeyRow)
+    // —— 平台令牌（仅内置 DeepSeek）——
+    // 「官方账单 / 分时段数据」的数据源。存进凭据：桌面壳/独立模式 = config.json 的
+    // credentials.DEEPSEEK_PLATFORM_TOKEN，DSH = 同名凭据 ref（同一个接口，无需改后端）。
+    // 前端只回显"是否已配置"，**不回传令牌值**（它是 platform.deepseek.com 的登录态）。
+    // 保存后即生效（host 每次请求都现取凭据），不需要重启。
+    var plTokenInp = null
+    if (isBuiltin) {
+      card.appendChild(apiSec('平台令牌（官方账单）'))
+      var plInp = document.createElement('input')
+      plInp.type = 'password'
+      plInp.className = 'dshwv-cropname'
+      plInp.style.flex = '1'
+      plInp.style.minWidth = '0'
+      plInp.style.margin = '0'
+      plInp.style.height = '26px'
+      plInp.style.boxSizing = 'border-box'
+      plInp.style.textAlign = 'left'
+      plInp.placeholder = '粘贴 platform.deepseek.com 的登录态 userToken（留空＝不改动）'
+      card.appendChild(apiPanelRow('平台令牌', plInp))
+      var plState = document.createElement('div')
+      plState.className = 'dshwv-bubhint'
+      plState.style.margin = '0 0 7px'
+      plState.textContent = m.platformTokenSet
+        ? '已配置 ✓ 官方账单与分时段数据可用'
+        : '尚未配置 —— 不填则「今日已用」退回余额差估算，官方账单/分时段拉不到'
+      card.appendChild(plState)
+      card.appendChild(apiPanelRow('', apiBtn('清除平台令牌', 'dshwv-snapbtn dshwv-snapbtn-no', function () {
+        postApiModels({ action: 'delete-key', keyRef: 'DEEPSEEK_PLATFORM_TOKEN' }, function () {
+          plState.textContent = '平台令牌已清除（官方账单将不可用）'
+          refreshModelList()
+        })
+      })))
+      plTokenInp = plInp
+    }
     // Base URL（中转站/自定义需要）
     var baseInp = apiTextInput(isNew ? '' : m.baseUrl, '例如 https://my-gateway.example.com')
     var baseRow = apiPanelRow('Base URL', baseInp)
+    // 内置模型不走中转站，Base URL 无效
+    if (isBuiltin) baseRow.style.display = 'none'
     card.appendChild(baseRow)
     // 余额接口（自定义可改；模板默认自动带上）
     // 用 host 下发的接口描述(balanceDesc)回填；m.balance 是数值，不能当描述用。
@@ -2283,31 +2353,41 @@ function openApiModelPanel(modelId) {
     card.appendChild(uScaRow)
     var matchInp = apiTextInput((m && Array.isArray(m.matchIds) ? m.matchIds.join(',') : ''), '会话事件里的模型名关键字，逗号分隔')
     var matchRow = apiPanelRow('事件匹配', matchInp)
+    // 事件匹配的作用是把「本机每轮对话」按关键字归到本模型 —— 桌面壳/独立模式
+    // 没有 DSH 会话流，这个匹配永远不会命中，字段留着只会让人以为填了就有数据
+    matchRow.style.display = HAS_SESSION_EVENTS ? '' : 'none'
     card.appendChild(matchRow)
     var tip = document.createElement('div')
     tip.className = 'dshwv-bubhint'
-    tip.textContent = '「事件匹配」用于没有余额差的模型：本机每轮对话的真实 token 花费，按这里的关键字归到本模型。'
+    tip.textContent = HAS_SESSION_EVENTS
+      ? '「事件匹配」用于没有余额差的模型：本机每轮对话的真实 token 花费，按这里的关键字归到本模型。'
+      : '桌面模式没有 DSH 会话流：本机每轮对话的 token 无法统计，所以「事件匹配」与按会话估算都用不了。'
     card.appendChild(tip)
     // —— 自定义单价（可选，元/百万 token）：给「没有余额接口/余额差」的模型按真实 token 换算金额 ——
     // v721:按用户要求，这块并入下方「接口与字段（高级）」折叠区（不再单独常显）。
     // 注意：高级区默认收起 → 子菜单里那行只读「单价」的提示负责告诉用户去哪填。
+    // ⚠ 桌面壳/独立模式：这三个价目 + 汇率都只服务于「把**会话事件的 token** 折算成钱」
+    //    （lib/index.js 里 price 只在 apiAttributeEvent 的调用链上用），桌面模式没有会话事件
+    //    → 整块隐藏，免得用户填了以为会影响余额/今日已用。币种（模型币种）与它无关，保留。
     var prc = (m && m.price) || {}
     var pHit = apiTextInput(prc.hit == null ? '' : prc.hit, '例: 0.02')
     var pMiss = apiTextInput(prc.miss == null ? '' : prc.miss, '例: 1.0')
     var pOut = apiTextInput(prc.out == null ? '' : prc.out, '例: 4.0')
     var pCur = apiSelectEl([['CNY', '人民币（元 / CNY）'], ['USD', '美元（$ / USD）']], String(prc.cur || 'CNY').toUpperCase() === 'USD' ? 'USD' : 'CNY')
     var pRate = apiTextInput(prc.rate == null ? '' : prc.rate, '仅美元时需要：汇率（元/USD），例 7.1')
-    card.appendChild(apiSec('单价（可选）'))
-    card.appendChild(apiPanelRow('缓存命中', pHit))
-    card.appendChild(apiPanelRow('未命中输入', pMiss))
-    card.appendChild(apiPanelRow('输出', pOut))
-    card.appendChild(apiPanelRow('币种', pCur))
-    card.appendChild(apiPanelRow('汇率', pRate))
-    var pTip = document.createElement('div')
-    pTip.className = 'dshwv-bubhint'
-    pTip.style.margin = '0 0 6px'
-    pTip.textContent = '单位为「币种 / 百万 token」，留空则沿用内置价目表。币种选美元时请填汇率，记账会换算成人民币（账本统一按 CNY 结算）；自定义单价不分峰谷。'
-    card.appendChild(pTip)
+    if (HAS_SESSION_EVENTS) {
+      card.appendChild(apiSec('单价（可选）'))
+      card.appendChild(apiPanelRow('缓存命中', pHit))
+      card.appendChild(apiPanelRow('未命中输入', pMiss))
+      card.appendChild(apiPanelRow('输出', pOut))
+      card.appendChild(apiPanelRow('币种', pCur))
+      card.appendChild(apiPanelRow('汇率', pRate))
+      var pTip = document.createElement('div')
+      pTip.className = 'dshwv-bubhint'
+      pTip.style.margin = '0 0 6px'
+      pTip.textContent = '单位为「币种 / 百万 token」，留空则沿用内置价目表。币种选美元时请填汇率，记账会换算成人民币（账本统一按 CNY 结算）；自定义单价不分峰谷。'
+      card.appendChild(pTip)
+    }
     // 按钮
     var btns = document.createElement('div')
     btns.className = 'dshwv-bubbtns'
@@ -2365,27 +2445,43 @@ function openApiModelPanel(modelId) {
       })
       btns.appendChild(testBtn)
     }
-    btns.appendChild(apiBtn('保存', 'dshwv-bubbtn dshwv-bubbtn-ok', function () {
+    // 内置模型只写密钥，按钮叫「保存密钥」更贴合实际（后端对本面板也只处理密钥）
+    btns.appendChild(apiBtn(isBuiltin ? '保存密钥' : '保存', 'dshwv-bubbtn dshwv-bubbtn-ok', function () {
       status.textContent = '保存中…'
       var nm = (nameInp.value || '').trim()
-      postApiModels(collect(), function (d) {
-        if (!d || !d.ok) { status.textContent = '保存失败: ' + ((d && d.error) || '未知错误'); return }
-        // 新建模型：保存后给一个明确的收尾——弹「保存成功」，点确认即关掉本面板。
-        // （原先是重新打开为编辑态，新建流程会停在一个没有明显关闭入口的面板上）
-        if (isNew) {
-          try { confirmMask.style.setProperty('z-index', '29500', 'important') } catch (err) {}
-          showConfirm('✓ 保存成功：' + (nm || '新模型') + '\n已加入模型列表', function () {
-            try { closeApiModelPanel() } catch (err) {}
-            // 背后的「- = 小鲸鱼记账 = -」列表同步刷新（模型行在静态区，需重建子界面）
-            refreshModelList()
-          }, '确认')
-          return
-        }
-        openApiModelPanel(d.id) // 编辑态：重新打开以刷新余额/错误
-        refreshModelList()
-      })
+      function saveModel() {
+        postApiModels(collect(), function (d) {
+          if (!d || !d.ok) { status.textContent = '保存失败: ' + ((d && d.error) || '未知错误'); return }
+          // 新建模型：保存后给一个明确的收尾——弹「保存成功」，点确认即关掉本面板。
+          // （原先是重新打开为编辑态，新建流程会停在一个没有明显关闭入口的面板上）
+          if (isNew) {
+            try { confirmMask.style.setProperty('z-index', '29500', 'important') } catch (err) {}
+            showConfirm('✓ 保存成功：' + (nm || '新模型') + '\n已加入模型列表', function () {
+              try { closeApiModelPanel() } catch (err) {}
+              // 背后的「- = 小鲸鱼记账 = -」列表同步刷新（模型行在静态区，需重建子界面）
+              refreshModelList()
+            }, '确认')
+            return
+          }
+          openApiModelPanel(d.id) // 编辑态：重新打开以刷新余额/错误
+          refreshModelList()
+        })
+      }
+      // 平台令牌（仅内置模型）：先单独写凭据（复用 set-key 接口），再保存模型本体。
+      // 留空表示不改动现有令牌，避免每次保存模型都把令牌清掉。
+      var tk = plTokenInp ? (plTokenInp.value || '').trim() : ''
+      if (tk) {
+        postApiModels({ action: 'set-key', keyRef: 'DEEPSEEK_PLATFORM_TOKEN', keyValue: tk }, function (r) {
+          if (!r || !r.ok) { status.textContent = '平台令牌保存失败: ' + ((r && r.error) || '未知错误'); return }
+          saveModel()
+        })
+      } else {
+        saveModel()
+      }
     }))
-    if (!isNew) {
+    // 内置模型不是注册表里的记录，删不掉（后端 apiDeleteModel 也会拒绝），
+    // 所以这个按钮对它毫无意义 → 不显示。
+    if (!isNew && !isBuiltin) {
       btns.appendChild(apiBtn('删除模型', 'dshwv-bubbtn dshwv-bubbtn-no', function () {
         showConfirm('删除模型「' + (m.name || m.id) + '」？\n该模型的提醒/预算与所有泡泡里引用它的模块会一并移除。', function () {
           postApiModels({ action: 'delete', id: m.id }, function (d) {
@@ -2428,8 +2524,10 @@ function openApiModelPanel(modelId) {
       if (delKeyRow && delKeyRow.parentNode) delKeyRow.parentNode.removeChild(delKeyRow)
     } catch (err) {}
     // 3) 不重要的接口/字段内容默认收起（从「余额接口」行到按钮行之间的全部内容）
-    try {
-      var advBox = document.createElement('div')
+    //    内置模型不需要这一整段（接口固定，改了也不生效）→ 干脆不建。
+    if (!isBuiltin) {
+      try {
+        var advBox = document.createElement('div')
       // 展开/收起过渡：max-height + 透明度（收起态 max-height:0；展开后放开限制避免截断）
       advBox.style.overflow = 'hidden'
       advBox.style.maxHeight = '0px'
@@ -2475,10 +2573,11 @@ function openApiModelPanel(modelId) {
       for (var mi = 0; mi < toMove.length; mi++) advBox.appendChild(toMove[mi])
       // v721:单价区块不再单独移出 —— 它随 toMove 一起进「高级」折叠区（按 DOM 顺序排在最后）
       // 通用兜底：卡片所有直接子项都禁止收缩（收缩=被压扁/裁切；我们要的是卡片滚动）
-      for (var ci = 0; ci < card.children.length; ci++) {
-        try { card.children[ci].style.flexShrink = '0' } catch (err) {}
-      }
-    } catch (err) {}
+        for (var ci = 0; ci < card.children.length; ci++) {
+          try { card.children[ci].style.flexShrink = '0' } catch (err) {}
+        }
+      } catch (err) {}
+    }
     mask.appendChild(card)
     mask.addEventListener('click', function (e) { if (e.target === mask) closeApiModelPanel() })
     document.body.appendChild(mask)
@@ -2517,7 +2616,9 @@ function openApiModelPanel(modelId) {
         tplNote.textContent = t.apiNote ? ('ℹ ' + t.apiNote) : ''
         tip.textContent = hasBal
           ? '「事件匹配」用于没有余额差的模型：本机每轮对话的真实 token 花费，按这里的关键字归到本模型。'
-          : '该厂商没有「用 API key 查余额」的接口 → 余额显示「—」，今日已用按会话事件估算（本机每轮对话的真实 token）。'
+          : (HAS_SESSION_EVENTS
+            ? '该厂商没有「用 API key 查余额」的接口 → 余额显示「—」，今日已用按会话事件估算（本机每轮对话的真实 token）。'
+            : '该厂商没有「用 API key 查余额」的接口，而桌面模式也没有 DSH 会话流 → 余额与今日已用都取不到数据（此模型仅「测试连通性」可用）。')
         // ⑥ 余额接口行保持可见（即使模板没有默认地址）：用户可以自己填
         balUrlRow.style.display = isCodexT ? 'none' : ''
       }
@@ -2674,8 +2775,8 @@ function buildUsageSettingsArea() {
     else if (am.codex && am.codex.ok) infoTxt = apiCodexRowText(am)
     else if (planOn) infoTxt = '厂商额度 ' + apiPlanSummary(am.id)
     else if (qOn) infoTxt = '额度 ' + apiQuotaSummary(am.id)
-    else if (am.balanceMode === 'events') infoTxt = '余额 —（无接口·按事件）· 今日 ' + apiFmtMoney(am.todayUsage, apiTodayCur(am))
-    else infoTxt = apiFmtMoney(am.balance, am.currency) + ' · 今日 ' + apiFmtMoney(am.todayUsage, apiTodayCur(am))
+    else if (am.balanceMode === 'events') infoTxt = '余额 —（' + apiNoBalanceLabel() + '）· 今日 ' + apiTodayMoneyText(am)
+    else infoTxt = apiFmtMoney(am.balance, am.currency) + ' · 今日 ' + apiTodayMoneyText(am)
     var info = mkScrollCell(infoTxt, 'dshwv-usage-hint', { flex: '1 1 auto', minWidth: '0', textAlign: 'right', paddingRight: '6px' })
     info.title = infoTxt
     r.appendChild(info)
@@ -2734,7 +2835,9 @@ function openModelQuotaEditor(modelId) {
     var hint = document.createElement('div')
     hint.className = 'dshwv-bubhint'
     hint.style.margin = '4px 0 8px'
-    hint.textContent = '订阅 / 资源包用这里：总量填套餐额度，已用按会话 token 自动累计（跨天保留）。泡泡里可用 {quota} 已用百分比、{quota_used} 已用、{quota_left} 剩余、{quota_total} 总量、{quota_reset} 重置倒计时'
+    hint.textContent = '订阅 / 资源包用这里：总量填套餐额度，已用' +
+      (HAS_SESSION_EVENTS ? '按会话 token 自动累计（跨天保留）' : '手动填写（桌面模式没有 DSH 会话流，无法按 token 自动累计）') +
+      '。泡泡里可用 {quota} 已用百分比、{quota_used} 已用、{quota_left} 剩余、{quota_total} 总量、{quota_reset} 重置倒计时'
     card.appendChild(hint)
     var onInp = document.createElement('input')
     onInp.type = 'checkbox'
@@ -2746,10 +2849,15 @@ function openModelQuotaEditor(modelId) {
     function buildModeSel() {
       var money = unitSel.value === 'money'
       // 金额单位：只给「手动填写」；已存在的 money+auto 数据在这里会显示为手动（used 值不会被清掉）
-      var cur = money ? 'manual' : ((q.mode === 'manual' || q.mode === 'codex') ? q.mode : 'auto')
+      // 桌面壳/独立模式：没有 DSH 会话流 →「自动统计（按会话 token）」永远累计不到，
+      // 直接不提供该选项；存量配置是 auto 时按手动展示（点保存后即落成 manual）。
+      var cur = money ? 'manual'
+        : ((q.mode === 'manual' || q.mode === 'codex') ? q.mode : (HAS_SESSION_EVENTS ? 'auto' : 'manual'))
       var opts = money
         ? [['manual', '手动填写']]
-        : [['auto', '自动统计（按会话 token，推荐）'], ['codex', 'Codex 本地会话 token'], ['manual', '手动填写']]
+        : (HAS_SESSION_EVENTS
+          ? [['auto', '自动统计（按会话 token，推荐）'], ['codex', 'Codex 本地会话 token'], ['manual', '手动填写']]
+          : [['codex', 'Codex 本地会话 token'], ['manual', '手动填写']])
       return apiSelectEl(opts, cur)
     }
     modeSel = buildModeSel()
@@ -2858,8 +2966,8 @@ function openApiModelMenu(modelId) {
     st.className = 'dshwv-bubhint'
     st.style.margin = '4px 0 8px'
     if (m.error) st.textContent = '⚠ ' + m.error
-    else if (m.balanceMode === 'events') st.textContent = '余额 —（该厂商无余额接口，按会话事件估算）· 今日已用 ' + apiFmtMoney(m.todayUsage, apiTodayCur(m))
-    else st.textContent = '余额 ' + apiFmtMoney(m.balance, m.currency) + ' · 今日已用 ' + apiFmtMoney(m.todayUsage, apiTodayCur(m))
+    else if (m.balanceMode === 'events') st.textContent = '余额 —（该厂商' + apiNoBalanceLabel() + '）· 今日已用 ' + apiTodayMoneyText(m)
+    else st.textContent = '余额 ' + apiFmtMoney(m.balance, m.currency) + ' · 今日已用 ' + apiTodayMoneyText(m)
     card.appendChild(st)
     var ms = (usageSet && usageSet.models && usageSet.models[modelId]) || {}
     function rowOf(label, stateFn, onEdit) {
@@ -2978,10 +3086,12 @@ function openApiModelMenu(modelId) {
     readonlyRow('单价', pTxt)
     // 币种不一致提示：今日已用按「自带币种」显示（会话事件为 CNY）。若与模型币种不同且没填汇率，
     // 今日预算提醒会被跳过（见 A 方案），这里给出可见的补救提示。
+    // ⚠ 桌面壳/独立模式没有会话流 → 今日已用不来自会话事件，这个"币种不一致"只会在数据本身
+    //    取不到时出现，提示「去填汇率」是误导，直接不显示。
     var tuc = String((m && m.todayUsageCurrency) || '').toUpperCase()
     var mc = String((m && m.currency) || '').toUpperCase()
     var rateOk = !!(pc && Number(pc.rate) > 0)
-    if (tuc && mc && tuc !== mc && !rateOk) {
+    if (HAS_SESSION_EVENTS && tuc && mc && tuc !== mc && !rateOk) {
       readonlyRow('⚠ 币种不一致', '请在「密钥 / 接口」里填写汇率，否则今日预算提醒会被跳过')
     }
     var btns = document.createElement('div')
@@ -4476,7 +4586,7 @@ function buildPlatformHistoryBlock(host) {
     if (!d || !d.ok) {
       // 区分「没配 token」与「拉取失败」，便于用户下一步处理
       status.textContent = d && d.code === 'NO_KEY'
-        ? '未配置 DEEPSEEK_PLATFORM_TOKEN（在 standalone/config.json 的 credentials 里填平台登录态 userToken 后重启服务）'
+        ? '未配置平台令牌：点模型列表里 DeepSeek 那行的「设置」→「密钥 / 接口」，在「平台令牌」里粘贴 platform.deepseek.com 的登录态 userToken 并保存即可（无需重启）'
         : '失败：' + (((d && d.error) || (d && d.code)) || '未知错误')
       return
     }
@@ -10876,6 +10986,9 @@ function apiModelBalanceText(modelId) {
 function apiModelTodayText(modelId) {
   var i = apiModelBalanceInfo(modelId)
   if (!i) return '--'
+  // 桌面壳/独立模式：无余额接口的模型今日已用来自然会话事件 → 恒为 0，
+  // 泡泡里显示 0.00 会让人以为"今天没花钱"，统一显示 —
+  if (!HAS_SESSION_EVENTS && i.mode === 'events') return '—'
   // 今日已用按它自己的币种显示（会话事件金额＝CNY，余额差＝厂商币种）
   return apiFmtMoney(i.today, i.todayCurrency || i.currency)
 }
@@ -10891,7 +11004,10 @@ function apiQuotaInfo(modelId) {
   if (!q) return null
   var total = Number(q.total) || 0
   // 自动模式：已用由 host 按会话 token 统计（q.autoUsed）；Codex 模式：按 Codex 本地会话 token；手动模式：面板里填的 q.used
-  var isAuto = (q.mode === 'codex') || ((q.mode !== 'manual') && (q.mode === 'auto' || q.autoUsed !== undefined))
+  // ⚠ 桌面壳/独立模式没有 DSH 会话流 → 「自动」永远统计不到（恒为 0），
+  //   所以在这里直接按手动处理（用面板里填的 used），避免显示成 0% 已用。
+  var autoUsable = HAS_SESSION_EVENTS
+  var isAuto = (q.mode === 'codex') || (autoUsable && ((q.mode !== 'manual') && (q.mode === 'auto' || q.autoUsed !== undefined)))
   var used = isAuto ? Math.max(0, Number(q.autoUsed) || 0) : Math.max(0, Number(q.used) || 0)
   if (!total && !used) return null
   var left = Math.max(0, total - used)
