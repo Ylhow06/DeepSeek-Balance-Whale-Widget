@@ -27,3 +27,15 @@ node_modules/
 *.bak2
 *.bak-devpaths
 _patch_*.patch
+
+# ============================================================================
+# 独立模式（standalone/）：config.json 里存真实 API key 与平台登录态 token，
+# 绝不入库 —— 仓库只提交 config.example.json 模板，首次使用自行复制改名。
+# ============================================================================
+standalone/config.json
+standalone/config.*.json
+# 但模板要提交（无密钥），供首次使用复制改名
+!standalone/config.example.json
+
+# 独立模式的运行时数据目录（账本/官方缓存/尺寸配置都在这里）
+.dsh-standalone/

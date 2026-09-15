@@ -334,6 +334,28 @@ var css = [
   '.dshwv-msgtext{width:100%;box-sizing:border-box;border:1px solid rgba(32,49,112,.4);border-radius:6px;padding:5px 7px;font-size:12px;color:#203170;background:#fff;resize:vertical;min-height:60px}',
   '.dshwv-usage-more{display:block;width:100%;margin-top:4px;border:1px dashed rgba(32,49,112,.5);border-radius:8px;background:transparent;color:#203170;font-size:12px;padding:5px;cursor:pointer}',
   '.dshwv-usage-more:hover{background:rgba(32,49,112,.08)}',
+  // 消费历史（平台官方）区块
+  '.dshwv-plat-panel{display:flex;flex-direction:column;gap:6px;min-width:0}',
+  '.dshwv-plat-ctrl{display:flex;flex-wrap:wrap;align-items:center;gap:6px}',
+  '.dshwv-plat-ctrl input[type=date]{flex:1 1 130px;min-width:0;border:1px solid rgba(32,49,112,.4);border-radius:6px;padding:3px 5px;font-size:12px;color:#203170;background:#fff;box-sizing:border-box}',
+  '.dshwv-plat-quick{display:flex;gap:4px;flex-wrap:wrap}',
+  '.dshwv-plat-quickbtn{border:1px solid rgba(32,49,112,.35);border-radius:6px;background:transparent;color:#203170;font-size:11px;padding:3px 7px;cursor:pointer}',
+  '.dshwv-plat-quickbtn:hover{background:rgba(32,49,112,.08)}',
+  '.dshwv-plat-go{border:1px solid rgba(32,49,112,.6);border-radius:6px;background:#203170;color:#fff;font-size:12px;padding:4px 12px;cursor:pointer;font-weight:600}',
+  '.dshwv-plat-go:hover{background:#2f4488}',
+  '.dshwv-plat-content{display:flex;flex-direction:column;gap:2px;min-width:0;overflow-x:hidden}',
+  '.dshwv-plat-days{overflow-y:auto;max-height:300px;padding-right:2px;margin:2px 0}',
+  '.dshwv-plat-days::-webkit-scrollbar{width:6px}',
+  '.dshwv-plat-days::-webkit-scrollbar-thumb{background:rgba(32,49,112,.14);border-radius:3px}',
+  // 数据来源标记（官方 / 估算）
+  '.dshwv-src-badge{flex:0 0 auto;font-size:9px;line-height:1;padding:2px 4px;border-radius:4px;background:rgba(47,162,76,.14);color:#1d7a3a;border:1px solid rgba(47,162,76,.35);margin-left:4px}',
+  // 某日各时段消费（小时柱条）
+  '.dshwv-hour-box{margin:4px 0 2px}',
+  '.dshwv-hour-row{display:flex;align-items:center;gap:6px;padding:1px 0;min-width:0}',
+  '.dshwv-hour-lab{flex:0 0 40px;font-variant-numeric:tabular-nums;color:#536ba9;font-size:11px}',
+  '.dshwv-hour-track{flex:1 1 auto;min-width:0;height:9px;background:rgba(32,49,112,.08);border-radius:5px;overflow:hidden}',
+  '.dshwv-hour-fill{height:100%;background:linear-gradient(90deg,#3aa6c8,#203170);border-radius:5px}',
+  '.dshwv-hour-cost{flex:0 0 auto;font-size:11px;color:#203170;font-variant-numeric:tabular-nums}',
   '.dshwv-usage-mask{position:fixed;inset:0;background:rgba(15,23,42,.55);z-index:22000;display:flex;align-items:center;justify-content:center;color-scheme:light}',
   '.dshwv-resmask{position:fixed;inset:0;background:rgba(15,23,42,.55);z-index:20300;display:flex;align-items:center;justify-content:center;color-scheme:light}',
   '.dshwv-usage-card{position:relative;background:#fff;border-radius:12px;width:min(560px,92vw);max-height:82vh;display:flex;flex-direction:column;box-shadow:0 10px 30px rgba(0,0,0,.3)}',
@@ -1249,6 +1271,9 @@ menuBox.appendChild(rowRes)
 var USAGE_REC_URL = '/dsh-whale/usage-records.json'
 var usageSet = null // {taskEnd,alert,budget} 用量设置缓存
 var USAGE_SET_URL = '/dsh-whale/usage-settings.json'
+var USAGE_PLAT_URL = '/dsh-whale/platform-usage.json'
+var USAGE_HOURS_URL = '/dsh-whale/platform-hours.json'
+var usagePlatRange = { from: '', to: '' } // 消费历史（平台官方）日期范围，缺省=最近30天
 function loadUsageSettings(cb) {
   try {
     fetch(USAGE_SET_URL, { cache: 'no-store' })
@@ -3056,12 +3081,27 @@ function fillUsagePanel(d) {
     var n = document.createElement('span')
     n.textContent = usageDayLabel(row.date)
     r.appendChild(n)
+    if (row.src === 'official') {
+      var b = document.createElement('span')
+      b.className = 'dshwv-src-badge'
+      b.textContent = '官方'
+      b.title = '该日金额来自平台官方账单（已覆盖余额差/事件估算）'
+      r.appendChild(b)
+    }
     var c = document.createElement('span')
     c.textContent = usageMoney(row.total)
     r.appendChild(c)
     daysBox.appendChild(r)
   })
   wrap.appendChild(daysBox)
+  // 官方覆盖状态提示（有官方数据时才显示）
+  if (d.official && d.official.days > 0) {
+    var ofTip = document.createElement('div')
+    ofTip.className = 'dshwv-usage-hint'
+    ofTip.textContent = '「官方」= 平台账单口径（已覆盖估算）· 共 ' + d.official.days + ' 天 · 同步于 ' +
+      (d.official.updatedAt ? String(d.official.updatedAt).slice(0, 16).replace('T', ' ') : '—')
+    wrap.appendChild(ofTip)
+  }
   // ③ 更多
   var more = document.createElement('button')
   more.type = 'button'
@@ -4051,6 +4091,10 @@ function fillUsageRecordsWindow(d) {
     var sevenAgg = usageAggModels(d.days7 || [])
     usageRatioRows(inner, '近7天模型占比', sevenAgg, usageMoney((d.total7) || 0))
   })
+  // ④ 消费历史（平台官方账单口径，可指定日期范围）
+  usageCollapseBlock(body, '消费历史（平台官方）', false, function (inner4) {
+    buildPlatformHistoryBlock(inner4)
+  })
   // ③ 每日与逐条明细(默认折叠;搜索/限量加载)
   detailBox = usageCollapseBlock(body, '每日与逐条明细', false, function (inner) {
     var search = document.createElement('input')
@@ -4072,6 +4116,9 @@ function fillUsageRecordsWindow(d) {
     })
     var dayTot = {}
     allDays.forEach(function (dx) { dayTot[dx.date] = Number(dx.total) || 0 })
+    // 数据来源：官方（平台账单，覆盖记账）还是估算（余额差/事件）
+    var daySrcMap = {}
+    allDays.forEach(function (dx) { daySrcMap[dx.date] = dx.src })
     var todayKeyStr2 = usageTodayKeyStr()
     function dayGroup(day, evs) {
       var row = document.createElement('div')
@@ -4086,6 +4133,13 @@ function fillUsageRecordsWindow(d) {
       name.style.whiteSpace = 'nowrap'
       name.textContent = day + (evs.length ? ' (' + evs.length + ')' : '')
       row.appendChild(name)
+      if (daySrcMap[day] === 'official') {
+        var badge = document.createElement('span')
+        badge.className = 'dshwv-src-badge'
+        badge.textContent = '官方'
+        badge.title = '该日金额来自平台官方账单（已覆盖余额差/事件估算）'
+        row.appendChild(badge)
+      }
       var c = document.createElement('span')
       c.style.flex = '0 0 auto'
       var dayV = dayTot[day]
@@ -4139,6 +4193,16 @@ function fillUsageRecordsWindow(d) {
               nd.textContent = '该日仅总额(启用模型明细后展示逐条)'
               detail.appendChild(nd)
             }
+            // 某日各时段消费（按钮按需拉取官方小时桶）
+            var hrBox = document.createElement('div')
+            hrBox.className = 'dshwv-hour-box'
+            detail.appendChild(hrBox)
+            var hb = document.createElement('button')
+            hb.type = 'button'
+            hb.className = 'dshwv-usage-more'
+            hb.textContent = '查看各时段消费'
+            hb.addEventListener('click', function (e) { e.stopPropagation(); usageLoadHours(day, hrBox) })
+            hrBox.appendChild(hb)
           }
           chev.textContent = '▾'
         } else chev.textContent = '▸'
@@ -4198,6 +4262,333 @@ function fillUsageRecordsWindow(d) {
     search.addEventListener('input', function () { renderGroups(search.value) })
     renderGroups('')
   })
+}
+// ===== 消费历史（平台官方账单口径）：日期范围 + 拉取 + 渲染 =====
+function usageLocalDayStr(offsetDays) {
+  var d = new Date()
+  d.setDate(d.getDate() + (offsetDays || 0))
+  var p = function (x) { return String(x).padStart(2, '0') }
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate())
+}
+// ===== 某日各时段消费（官方小时桶）=====
+// hours: [{hour, cost, input, output, requests}]，hour 为当地 0–23 点
+function usageHourLabel(h) { return (h < 10 ? '0' : '') + h + ':00' }
+function usageFmtTok(n) {
+  var v = Number(n) || 0
+  if (v >= 1e8) return (v / 1e8).toFixed(2) + '亿'
+  if (v >= 1e4) return (v / 1e4).toFixed(1) + '万'
+  return String(Math.round(v))
+}
+function usageRenderHours(box, hours, title) {
+  box.innerHTML = ''
+  if (title) {
+    var t = document.createElement('div')
+    t.className = 'dshwv-usage-hint'
+    t.style.fontWeight = '600'
+    t.style.margin = '4px 0 2px'
+    t.textContent = title
+    box.appendChild(t)
+  }
+  var list = (hours || []).filter(function (h) { return h && (Number(h.cost) > 0.0001 || Number(h.requests) > 0) })
+  if (!list.length) {
+    var no = document.createElement('div')
+    no.className = 'dshwv-usage-hint'
+    no.textContent = '该日暂无可用的分时段数据'
+    box.appendChild(no)
+    return
+  }
+  list = list.slice().sort(function (a, b) { return Number(a.hour) - Number(b.hour) })
+  var max = 0
+  list.forEach(function (h) { if (Number(h.cost) > max) max = Number(h.cost) })
+  if (max <= 0) max = 1
+  list.forEach(function (h) {
+    var row = document.createElement('div')
+    row.className = 'dshwv-hour-row'
+    var lab = document.createElement('span')
+    lab.className = 'dshwv-hour-lab'
+    lab.textContent = usageHourLabel(Number(h.hour))
+    row.appendChild(lab)
+    var track = document.createElement('div')
+    track.className = 'dshwv-hour-track'
+    var fill = document.createElement('div')
+    fill.className = 'dshwv-hour-fill'
+    fill.style.width = Math.max(2, Math.round(Number(h.cost) / max * 100)) + '%'
+    track.appendChild(fill)
+    row.appendChild(track)
+    var c = document.createElement('span')
+    c.className = 'dshwv-hour-cost'
+    c.textContent = usageMoney(h.cost)
+    c.title = '费用 ' + usageMoney(h.cost) +
+      ' · 输入 ' + usageFmtTok(h.input) + ' · 输出 ' + usageFmtTok(h.output) +
+      ' · 请求 ' + usageFmtTok(h.requests)
+    row.appendChild(c)
+    box.appendChild(row)
+  })
+  var sum = list.reduce(function (a, x) { return a + (Number(x.cost) || 0) }, 0)
+  var tip = document.createElement('div')
+  tip.className = 'dshwv-usage-hint'
+  tip.textContent = '共 ' + list.length + ' 个时段有消费，合计 ' + usageMoney(sum) + '（悬停柱条看 token / 请求数）'
+  box.appendChild(tip)
+}
+// 拉某日分时段（缓存没有时后端会现抓）
+function usageLoadHours(date, box, opts) {
+  box.innerHTML = '<div class="dshwv-usage-hint">加载分时段…</div>'
+  fetch(USAGE_HOURS_URL + '?date=' + encodeURIComponent(date) + (opts && opts.refresh ? '&refresh=1' : ''), { cache: 'no-store' })
+    .then(function (r) { return r.ok ? r.json() : null })
+    .then(function (d) {
+      if (!d) { box.innerHTML = '<div class="dshwv-usage-hint">分时段加载失败</div>'; return }
+      if (!d.ok) {
+        box.innerHTML = '<div class="dshwv-usage-hint">' +
+          (d.code === 'NO_KEY' ? '未配置平台 token，无法拉取分时段' : ('分时段失败：' + (d.error || d.code))) + '</div>'
+        return
+      }
+      usageRenderHours(box, d.hours, usageDayLabel(date) + ' 各时段消费（合计 ' + usageMoney(d.cost) + '）')
+    })
+    .catch(function () { box.innerHTML = '<div class="dshwv-usage-hint">分时段加载失败</div>' })
+}
+function buildPlatformHistoryBlock(host) {
+  host.innerHTML = ''
+  var panel = document.createElement('div')
+  panel.className = 'dshwv-plat-panel'
+  host.appendChild(panel)
+  // —— 控件行：起 / 止 / 快捷 / 拉取 ——
+  var ctrl = document.createElement('div')
+  ctrl.className = 'dshwv-plat-ctrl'
+  var today = usageLocalDayStr(0)
+  var fromIn = document.createElement('input')
+  fromIn.type = 'date'
+  fromIn.value = usagePlatRange.from || usageLocalDayStr(-29)
+  fromIn.max = today
+  var toIn = document.createElement('input')
+  toIn.type = 'date'
+  toIn.value = usagePlatRange.to || today
+  toIn.max = today
+  var btns = document.createElement('div')
+  btns.className = 'dshwv-plat-quick'
+  var QUICK = [['近7天', 6], ['近30天', 29], ['本月', null], ['自定义', 'custom']]
+  QUICK.forEach(function (item) {
+    var b = document.createElement('button')
+    b.type = 'button'
+    b.textContent = item[0]
+    b.className = 'dshwv-plat-quickbtn'
+    b.addEventListener('click', function () {
+      if (item[1] === 'custom') { usagePlatRange.from = fromIn.value; usagePlatRange.to = toIn.value; return }
+      var f, t = today
+      if (item[1] === null) {
+        var mStart = new Date()
+        mStart.setDate(1)
+        f = mStart.getFullYear() + '-' + String(mStart.getMonth() + 1).padStart(2, '0') + '-01'
+      } else {
+        f = usageLocalDayStr(-item[1])
+      }
+      fromIn.value = f
+      toIn.value = t
+      usagePlatRange = { from: f, to: t }
+    })
+    btns.appendChild(b)
+  })
+  var goBtn = document.createElement('button')
+  goBtn.type = 'button'
+  goBtn.className = 'dshwv-plat-go'
+  goBtn.textContent = '拉取历史'
+  ctrl.appendChild(fromIn)
+  ctrl.appendChild(toIn)
+  ctrl.appendChild(btns)
+  ctrl.appendChild(goBtn)
+  panel.appendChild(ctrl)
+  var status = document.createElement('div')
+  status.className = 'dshwv-usage-hint'
+  status.textContent = '选择日期范围后点「拉取历史」（缺省最近 30 天；官方精确账单口径，需已配置平台登录态 token）'
+  panel.appendChild(status)
+  var content = document.createElement('div')
+  content.className = 'dshwv-plat-content'
+  panel.appendChild(content)
+  function doFetch() {
+    var f = fromIn.value || usageLocalDayStr(-29)
+    var t = toIn.value || today
+    usagePlatRange = { from: f, to: t }
+    status.textContent = '拉取中…（范围 ' + f + ' ~ ' + t + '，按 30 天分片，天数越多越久）'
+    content.innerHTML = ''
+    // 注意：查询串必须以 '?' 开头，不能写成 '/?…'——多出的 '/' 会变成
+    // '/dsh-whale/platform-usage.json/'，而路由是按精确路径注册的，会直接 404。
+    var qs = '?from=' + encodeURIComponent(f) + '&to=' + encodeURIComponent(t)
+    fetch(USAGE_PLAT_URL + qs, { cache: 'no-store' })
+      .then(function (r) {
+        if (!r.ok) {
+          status.textContent = '拉取失败：HTTP ' + r.status
+          return null
+        }
+        return r.json()
+      })
+      .then(function (d) { if (d) paintPlatformResult(d) })
+      .catch(function (err) { status.textContent = '拉取失败：网络错误或服务端无响应（' + String((err && err.message) || err) + '）' })
+  }
+  goBtn.addEventListener('click', function (e) { e.stopPropagation(); doFetch() })
+  function fmtTokens(n) {
+    var v = Number(n) || 0
+    if (v >= 1e8) return (v / 1e8).toFixed(2) + ' 亿'
+    if (v >= 1e4) return (v / 1e4).toFixed(1) + ' 万'
+    return String(Math.round(v))
+  }
+  function paintPlatformResult(d) {
+    content.innerHTML = ''
+    if (!d || !d.ok) {
+      // 区分「没配 token」与「拉取失败」，便于用户下一步处理
+      status.textContent = d && d.code === 'NO_KEY'
+        ? '未配置 DEEPSEEK_PLATFORM_TOKEN（在 standalone/config.json 的 credentials 里填平台登录态 userToken 后重启服务）'
+        : '失败：' + (((d && d.error) || (d && d.code)) || '未知错误')
+      return
+    }
+    var range = d.range || {}
+    var lines = []
+    lines.push('官方账单 ' + range.from + ' ~ ' + range.to + '：合计 ' + usageMoney(d.totalCost))
+    if (d.totalTokens && (d.totalTokens.input || d.totalTokens.output)) {
+      lines.push('Token：输入 ' + fmtTokens(d.totalTokens.input) + ' · 输出 ' + fmtTokens(d.totalTokens.output) + ' · 请求 ' + fmtTokens(d.totalTokens.requests))
+    }
+    status.textContent = lines.join('  ·  ') + (d.failedDays && d.failedDays.length ? ('  · ⚠ ' + d.failedDays.length + ' 天拉取失败') : '')
+    // 按模型占比（官方 costByModel 会带上全部模型键，含 0 值；过滤掉零费用模型避免噪声）
+    var models = []
+    var cbm = d.costByModel || {}
+    for (var m1 in cbm) {
+      if (!Object.prototype.hasOwnProperty.call(cbm, m1)) continue
+      var cv = Number(cbm[m1]) || 0
+      if (cv <= 0.0001) continue
+      models.push({ model: m1, cost: cv })
+    }
+    models.sort(function (a, b) { return b.cost - a.cost })
+    var aggArr = models.map(function (x) { return { model: x.model, cost: x.cost } })
+    usageRatioRows(content, '模型占比（官方费用）', aggArr, usageMoney(d.totalCost))
+    // 每日明细：只列「当天真的有费用或 token」的天（空白天不占位）
+    function dayCostOf(x) {
+      var s = 0
+      var m = x.costByModel || {}
+      for (var k in m) { if (Object.prototype.hasOwnProperty.call(m, k)) s += Number(m[k]) || 0 }
+      return s
+    }
+    function dayTokensOf(x) {
+      return x.tokens ? ((Number(x.tokens.input) || 0) + (Number(x.tokens.output) || 0)) : 0
+    }
+    var dayRows = (d.days || []).filter(function (x) {
+      return dayCostOf(x) > 0.0001 || dayTokensOf(x) > 0
+    }).sort(function (a, b) { return a.day < b.day ? 1 : -1 })
+    var shown = 0
+    var listWrap = document.createElement('div')
+    listWrap.className = 'dshwv-plat-days'
+    content.appendChild(listWrap)
+    uSectionTitleInto(content, '每日明细（官方，' + dayRows.length + ' 天有消费）')
+    function paintDays() {
+      listWrap.innerHTML = ''
+      var upto = Math.min(shown + 12, dayRows.length)
+      for (var i = 0; i < upto; i++) {
+        var row = dayRows[i]
+        var tr = document.createElement('div')
+        tr.className = 'dshwv-usage-row'
+        var nm = document.createElement('span')
+        nm.textContent = usageDayLabel(row.day)
+        var dayCost = dayCostOf(row)
+        var cbm2 = row.costByModel || {}
+        var cst = document.createElement('span')
+        cst.textContent = usageMoney(dayCost)
+        var chev = document.createElement('span')
+        chev.className = 'dshwv-usage-chev'
+        chev.textContent = '▸'
+        var det = document.createElement('div')
+        det.className = 'dshwv-usage-daydetail'
+        det.style.display = 'none'
+        var built = false
+        tr.addEventListener('click', function () {
+          var on = det.style.display !== 'block'
+          if (on) {
+            if (!built) {
+              built = true
+              var ms = []
+              for (var mk in cbm2) {
+                if (!Object.prototype.hasOwnProperty.call(cbm2, mk)) continue
+                var mv = Number(cbm2[mk]) || 0
+                if (mv <= 0.0001) continue
+                ms.push({ model: mk, cost: mv })
+              }
+              ms.sort(function (a, b) { return b.cost - a.cost })
+              if (row.tokens) {
+                var tk = document.createElement('div')
+                tk.className = 'dshwv-usage-hint'
+                tk.style.margin = '2px 0'
+                tk.textContent = 'Token：输入 ' + fmtTokens(row.tokens.input) + ' · 输出 ' + fmtTokens(row.tokens.output) + ' · 请求 ' + fmtTokens(row.tokens.requests)
+                det.appendChild(tk)
+              }
+              ms.forEach(function (x) {
+                var r2 = document.createElement('div')
+                r2.className = 'dshwv-usage-row'
+                var n2 = document.createElement('span')
+                n2.textContent = usageModelLabel(x.model)
+                n2.title = String(x.model)
+                var c2 = document.createElement('span')
+                c2.textContent = usageMoney(x.cost)
+                r2.appendChild(n2)
+                r2.appendChild(c2)
+                det.appendChild(r2)
+              })
+              if (!ms.length) {
+                var empty = document.createElement('div')
+                empty.className = 'dshwv-usage-hint'
+                empty.textContent = '该日无费用明细'
+                det.appendChild(empty)
+              }
+              // 各时段消费：范围抓取时已带回小时桶，直接渲染；缺小时桶则按钮按需现抓
+              var hrBox = document.createElement('div')
+              hrBox.className = 'dshwv-hour-box'
+              det.appendChild(hrBox)
+              if (row.hours && row.hours.length) {
+                usageRenderHours(hrBox, row.hours, '各时段消费')
+              } else {
+                var hb = document.createElement('button')
+                hb.type = 'button'
+                hb.className = 'dshwv-usage-more'
+                hb.textContent = '查看各时段消费'
+                hb.addEventListener('click', function (e) { e.stopPropagation(); usageLoadHours(row.day, hrBox) })
+                hrBox.appendChild(hb)
+              }
+            }
+            det.style.display = on ? 'block' : 'none'
+            chev.textContent = on ? '▾' : '▸'
+          } else {
+            det.style.display = 'none'
+            chev.textContent = '▸'
+          }
+        })
+        tr.appendChild(nm)
+        tr.appendChild(cst)
+        tr.appendChild(chev)
+        listWrap.appendChild(tr)
+        listWrap.appendChild(det)
+      }
+      shown = upto
+      if (shown < dayRows.length) {
+        var mb = document.createElement('button')
+        mb.type = 'button'
+        mb.className = 'dshwv-usage-more'
+        mb.textContent = '加载更早记录（还剩 ' + (dayRows.length - shown) + ' 天）'
+        mb.addEventListener('click', function () { paintDays() })
+        listWrap.appendChild(mb)
+      }
+    }
+    paintDays()
+  }
+  function uSectionTitleInto(body, title, rightTxt) {
+    var h = document.createElement('div')
+    h.className = 'dshwv-usage-sec'
+    h.style.marginTop = '6px'
+    var l = document.createElement('span')
+    l.textContent = title
+    h.appendChild(l)
+    if (rightTxt) {
+      var r = document.createElement('span')
+      r.className = 'dshwv-usage-total'
+      r.textContent = rightTxt
+      h.appendChild(r)
+    }
+    body.appendChild(h)
+  }
 }
 document.body.appendChild(rolePanel)
 
