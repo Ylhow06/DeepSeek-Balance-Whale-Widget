@@ -11993,7 +11993,10 @@ function refresh(manual) {
     ctrl = new AbortController()
     timer = setTimeout(function () { try { ctrl.abort() } catch (err) {} }, FETCH_TIMEOUT_MS)
   } catch (err) {}
-  fetch(BALANCE_URL, { cache: 'no-store', signal: ctrl ? ctrl.signal : undefined })
+  // 手动刷新（点鲸鱼）带 force=1：让后端顺带强制拉一次当日详细数据（20s 小冷却），
+  // 自动轮询则走 90s 冷却，避免把平台请求打得太勤。
+  var refreshUrl = BALANCE_URL + (manual ? '?force=1' : '')
+  fetch(refreshUrl, { cache: 'no-store', signal: ctrl ? ctrl.signal : undefined })
     .then(function (r) { return r.json() })
     .then(function (data) {
       if (data && data.ok) {

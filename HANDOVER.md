@@ -179,6 +179,54 @@ platform-hours    : 09-15 → 5 时段 / 2.0499（cached）
 官方缓存           : 4 天，含 hours 小时桶
 ```
 
+## 4.5 只在你主动操作时拉取「当日详细数据」
+
+原来 `balance.json`（挂件每 60s 轮询的那条）的 `todayUsage` 走 `ledgerTodayTotal()`
+（余额差估算），而面板 `usage-records.json` 走官方覆盖 —— **同一个「今日已用」两个数**。
+现在两者统一到官方口径，但**只在主动操作时**才回平台拉数据。
+
+### 触发规则（重要）
+
+| 场景 | 是否回平台拉数据 | 说明 |
+|---|---|---|
+| 自动轮询 `balance.json`（每 60s） | **否** | 用户没在看面板，拉了也看不到，纯白费请求 |
+| 手动点小鲸鱼 `balance.json?force=1` | 是（当天） | 只抓今天一天，20s 下限防连点 |
+| 打开用量面板 `usage-records.json` | 是（近 3 天） | 面板**打开着**才算，10 分钟冷却；面板关着时不会有这个请求 |
+| 「拉取历史」按钮 | 是（所选范围） | 逐日抓取 |
+| 「查看各时段消费」按钮 | 是（那一天） | 缓存没有才现抓 |
+
+关键点：`usage-records.json` **只在用量面板打开期间**才被请求（`usageRefreshTimer` 仅在
+`usagePanelOpen` 时跑），所以面板关着时不会有任何后台平台请求 —— 完全符合
+「看不到就不拉」。
+
+### 实现
+
+- **新增** `maybeSyncTodayOfficial()`：只抓**今天一天**（amount+cost 两个请求），
+  拿到的当天合计/分模型/**各时段小时桶**并入官方缓存；抓完把 `balanceCache` 置空，
+  下一轮刷新立刻用上新值（非阻塞，本轮先用缓存里已有的官方值 → 最多滞后一轮）。
+- **只在 `force=1` 时调用**（`balance.json` 路由里 `if (force) maybeSyncTodayOfficial()`）；
+  `OFFICIAL_TODAY_SYNC_MIN_MS = 20s` 为连点下限。
+- **今日已用改官方口径**：`getBalancePayload()` 里 `officialTodayRecord()` 有官方当天记录就用它，
+  否则退回余额差；返回值新增 `todayUsageSource: 'official' | 'estimate'`。
+- **前端**：`refresh(manual)` 手动时请求 `balance.json?force=1`，自动轮询不带该参数。
+
+### 实测（2026-09-15）
+
+```
+手动 force=1     : 触发当天同步，fetchedAt 09:53:25 → 09:54:07，当天 cost 更新
+自动轮询 x3      : refetched=False  ✓（不拉）
+手动 force=1     : refetched=True   ✓（拉）
+下一轮刷新       : todayUsage=… source=official（滞后一轮生效，符合设计）
+一致性           : balance.json 的 todayUsage 与 usage-records 的 today.total 完全一致 ✓
+```
+
+### 代价
+
+面板关着时**零**平台请求；面板打开时最多每 10 分钟一次近 3 天同步；
+点一次小鲸鱼 = 2 个请求。不配 `DEEPSEEK_PLATFORM_TOKEN` 则整条链路静默跳过。
+
+
+
 
 ## 5. 当前环境状态（接手时注意）
 
