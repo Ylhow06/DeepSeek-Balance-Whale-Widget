@@ -105,18 +105,7 @@ dsh-whale-widget/
 │   ├── task-end-a.wav        # 任务结束音内置预设（A）
 │   ├── bubble-petpet.gif     # 内置泡泡图：petpet
 │   └── bubble-money1.gif     # 内置泡泡图：money1（余额预警默认内容的配图）
-├── standalone/               # 独立运行薄壳（脱离 DSH，方案 A）
-│   ├── server.js             # 伪造 5 类 ctx 能力 + 动态 import lib/index.js + 起 http 服务
-│   └── config.json           # 独立运行的凭据（credentials 段；**含密钥，已 .gitignore 排除**）
-├── desktop/                  # Electron 桌面宠物壳（方案 B，独立 package.json）
-│   ├── main.js               # 主进程：userData 落点 / 拉起后端 / 覆盖层 / 托盘 / 单实例锁
-│   ├── preload.cjs           # contextBridge：向页面暴露穿透开关
-│   ├── overlay-glue.js       # 页面自加载的胶水：把命中判定写给主进程
-│   ├── electron-builder.yml  # 打包配置（portable + 向导式 nsis；**asar 必须关**）
-│   └── scripts/              # prepare-build.mjs（拼 .build/app）+ check-hook.mjs（开发期自检）
-├── whale-widget-prompt.md    # 完整规格/维护提示词（面向二次开发）
-├── HANDOVER.md               # 方案 A（浏览器独立运行）交接：启动 / 能力边界 / 清理记录
-└── HANDOVER-DESKTOP.md       # 方案 B（桌面宠物壳）交接：架构 / 穿透链路 / 踩坑与验收
+└── whale-widget-prompt.md    # 完整规格/维护提示词（面向二次开发）
 ```
 
 运行时数据（都放在 `$DSH_HOME`，默认 `~/.dsh`；本机开发环境为 `D:\TestBox\deepseek\`）：
@@ -133,50 +122,6 @@ dsh-whale-widget/
 | `whale-roles/` | 自定义角色图 + `roles.json` 索引 |
 | `whale-audio/` | 音频片段 `<id>.wav` + `audio.json` 索引（音效组/片段） |
 | `whale-bubble-imgs/` | 泡泡图库图片 + `bubble-imgs.json` 索引 |
-
-## 独立运行（脱离 DSH）
-
-挂件本来是 DSH 的插件，但它也可以**单独跑起来**。两种形态，共用同一份核心代码（核心零改动）：
-
-| | 方案 A：浏览器标签页 | 方案 B：桌面宠物壳 |
-|---|---|---|
-| 形态 | 打开一个本地网页 | Windows 桌宠（全屏透明覆盖层 + 托盘） |
-| 适合 | 临时看一眼、调试 | 常驻桌面当宠物 |
-
-### 方案 A：浏览器标签页
-
-```powershell
-cd standalone
-node server.js          # 默认 http://127.0.0.1:3080
-```
-
-配置（首次运行会在下面这个位置生成）：`%APPDATA%\WhaleDesktop\config.json`
-
-### 方案 B：桌面宠物壳（Electron）
-
-```powershell
-cd desktop
-npm install
-npm run dev             # 开发运行
-npm run build           # 打包：dist\小鲸鱼-0.1.0-便携版.exe + 小鲸鱼-0.1.0-安装版.exe
-```
-
-- **便携版**：双击即跑，解压到临时目录运行，**exe 放哪都行**（那就是它的"安装路径"）
-- **安装版**：向导式，**可自选安装目录**（`allowToChangeInstallationDirectory` 只在 `oneClick:false` 时生效）
-- 数据落点：`%APPDATA%\WhaleDesktop\config.json` + `%APPDATA%\WhaleDesktop\data\`
-- 运行日志：托盘 →「打开日志文件」（`%APPDATA%\WhaleDesktop\desktop.log`）；`--selftest` 可全自动断言
-- 开发期自检：`npm run check:hook`（jsdom 离线跑真脚本，14+ 条断言）
-- ⚠️ 打包**必须 `asar:false`**：主进程动态 import 走 Node ESM loader，打进 asar 会"双击无反应"
-
-### 独立运行时的能力边界
-
-- **失去**：每轮对话消耗、任务结束音（依赖 DSH 会话事件流）、浏览器信任栅栏
-- **保留**：余额刷新、余额差记账、峰谷、泡泡、音效/角色/图片、自定义 API 模型、官方账单（需平台令牌）
-- 挂件会自动识别宿主：没有 DSH 会话流时，**「每轮消耗提示 / 任务结束音效」这两处 UI 不渲染**，也不会每秒空轮询那个恒为 0 的接口
-
-> 独立模式里**依赖会话事件的自定义模型也取不到数据**（那些厂商模板标注了「无余额接口」）；
-> 有余额接口的厂商不受影响 —— 它们的今日已用走**余额差记账**，不依赖 DSH。
-> 内置 DeepSeek 的「今日已用」优先取**平台官方账单**（需配置平台令牌），取不到才退回余额差。
 
 ## 安装
 
@@ -310,20 +255,7 @@ MeteorNOX/DeepSeek-Balance-Whale-Widget，或者我本地已经有这个插件�
 
 - **`DEEPSEEK_API_KEY`（必需）**：DeepSeek API 密钥，用于拉取余额（`GET https://api.deepseek.com/user/balance`）。在 DSH 凭据服务里配置（凭据管理界面 / `.dsh/.credentials.yaml`）。
 
-> `DEEPSEEK_PLATFORM_TOKEN` **可选**（platform.deepseek.com 的登录态 userToken）：
-> 配了就能拉**平台官方账单**（按日精确费用、分时段、按模型占比），官方数据会**覆盖**余额差/事件估算；
-> 不配也能用，只是「今日已用」退回余额差口径、且分时段与消费历史拉不到。
-> 早期版本的"实时·令牌"模式已下线，记账主口径仍是**小鲸鱼记账**（余额差 + 会话事件）。
-
-**独立运行（方案 A / B）时凭据不进 DSH**：写在 `%APPDATA%\WhaleDesktop\config.json` 的 `credentials` 段，
-可以直接改文件，也可以在界面里填 —— 内置 DeepSeek 那行的「设置 → 密钥 / 接口」：
-
-| 位置 | 写入的键 |
-|---|---|
-| 「API key」输入框 | `DEEPSEEK_API_KEY` |
-| 「平台令牌（官方账单）」输入框 | `DEEPSEEK_PLATFORM_TOKEN` |
-
-两个都是**保存即生效**（每次请求现取凭据），不用重启；值只写不读回，界面只显示"是否已配置"。
+> **不需要** `DEEPSEEK_PLATFORM_TOKEN`。早期版本的"实时·令牌"模式已下线，今日已用统一由**小鲸鱼记账**（余额差 + 会话事件）计算，零令牌开箱即用。
 
 添加自定义模型时，还会按需用到各自厂商的凭据名（都可不配，用到哪个配哪个）：
 
