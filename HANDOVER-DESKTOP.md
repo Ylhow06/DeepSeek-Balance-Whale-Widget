@@ -1242,5 +1242,38 @@ Remove-Item Env:ELECTRON_RUN_AS_NODE      # 宿主预设的，会让 electron �
 > `%LOCALAPPDATA%\electron\Cache\<hash>\electron-v44.3.0-win32-x64.zip`，
 > 直接 `Expand-Archive` 到 `node_modules/electron/dist`，再写一个内容为 `electron.exe` 的 `path.txt` 即可。
 
+### 21.8 打包必须挂国内镜像（这是本机打包唯一卡点，2026-09-18 解决）
+
+`npm run build:portable` 曾在 `packaging … electron=44.3.0` 之后
+**`Timeout awaiting 'request' for 600000ms`**（got 库，10 分钟）失败，
+看着像"网络不通"，但 `Test-NetConnection` 对 registry.npmjs.org / npmmirror.com / github.com /
+objects.githubusercontent.com **全部 True** —— TCP 通，卡在 electron 二进制的**下载 URL** 上。
+
+**解法：给 electron / electron-builder 指定国内镜像再打包**（缺一不可）：
+
+```powershell
+cd desktop
+Remove-Item -Recurse -Force dist, .build -ErrorAction SilentlyContinue   # 见 §12.5：防 safe-delete 垫片
+Remove-Item Env:ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue
+$env:ELECTRON_BUILDER_BINARIES_MIRROR = 'https://npmmirror.com/mirrors/electron-builder-binaries/'
+$env:ELECTRON_MIRROR = 'https://npmmirror.com/mirrors/electron/'
+npm run build:portable            # 便携版，实测 3m21s
+npx electron-builder --win nsis --config electron-builder.yml   # 安装版，实测 1m19s（复用 win-unpacked）
+```
+
+产物（2026-09-18 实测）：
+```
+dist\小鲸鱼-0.1.0-便携版.exe   100.2 MB
+dist\小鲸鱼-0.1.0-安装版.exe   111.3 MB
+```
+
+两点经验：
+- **工具缓存本来就是齐的**（`%LOCALAPPDATA%\electron-builder\Cache` 里有 nsis-3.0.4.1 /
+  nsis-resources / 7zip / icons），所以只需要解决 electron 那一份下载 —— 不用预取 winCodeSign；
+  两个 target 都只打印 `no signing info identified, signing is skipped`，**签名不需要联网**。
+- 打包完成后 `dist\win-unpacked`（约 234 MB 中间产物）可以删掉，只留两个 exe；
+  下次打包会重新解压（从缓存，很快）。
+
+
 
 

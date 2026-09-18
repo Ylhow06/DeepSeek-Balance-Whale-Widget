@@ -82,9 +82,11 @@ cd standalone && node server.js      # 打开 http://127.0.0.1:3080
 ```
 
 ```powershell
-# 3) 重打桌面包（必须先删空 dist）
+# 3) 重打桌面包（必须先删空 dist；并挂国内镜像，否则 electron 下载会 10 分钟超时）
 cd desktop
 Remove-Item -Recurse -Force dist -ErrorAction SilentlyContinue
+$env:ELECTRON_BUILDER_BINARIES_MIRROR = 'https://npmmirror.com/mirrors/electron-builder-binaries/'
+$env:ELECTRON_MIRROR = 'https://npmmirror.com/mirrors/electron/'
 npm run build
 ```
 
