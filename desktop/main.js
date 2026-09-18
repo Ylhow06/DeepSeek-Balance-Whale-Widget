@@ -47,7 +47,12 @@ function flog(msg) {
 //    而我按 %APPDATA%\WhaleDesktop 预置凭据 → 应用读的是另一个目录 → 余额显示「—」。
 //    这里显式 setPath，dev 与打包态永远同一处，且路径保持 ASCII。
 //    （setPath 要求目录已存在，否则抛错 → 先 mkdir）
-const USER_DATA = path.join(app.getPath('appData'), 'WhaleDesktop')
+//    另外支持 WHALE_USER_DATA 覆盖：单实例锁就落在这个目录下，所以想"在正式版正开着的时候
+//    跑一次 --selftest"必须换一个目录，否则第二个实例会被锁直接挡掉、静默退出（本机实测：
+//    用户装着正式版在跑时，`electron . --selftest` 秒退、退出码 0、什么报告都没有）。
+const USER_DATA = process.env.WHALE_USER_DATA
+  ? path.resolve(process.env.WHALE_USER_DATA)
+  : path.join(app.getPath('appData'), 'WhaleDesktop')
 const DATA_HOME = path.join(USER_DATA, 'data')
 const CONFIG_PATH = path.join(USER_DATA, 'config.json')
 try {
@@ -146,6 +151,8 @@ function main() {
   let cursorTimer = null
   let lastCursorPt = null
   let lastCursorSentAt = 0
+  let freezeCursorPoll = false // 自检期间冻结光标轮询（见 startCursorPolling 里的说明）
+  let ignoreMsgCount = 0       // 渲染进程发来的 set-ignore 消息条数（自检断言"通道畅通"用）
 
   // -------------------------------------------------------------------------
   // ③ ready 之后：起后端 → 开覆盖层 → 托盘
@@ -234,12 +241,20 @@ function main() {
           catch (e) { if (!hitErr) hitErr = ((e && e.name) || 'Error') + ': ' + ((e && e.message) || ''); return null }
         }
         if (r && typeof window.__dshwHitTest === 'function') {
-          // 鲸鱼 bbox 中心未必是不透明像素（鲸鱼是不规则形状），
-          // 这里扫描 bbox 找第一个不透明点作为「命中点」。
+          // 鲸鱼 bbox 中心未必是不透明像素（鲸鱼是不规则形状），这里扫描 bbox 找命中点。
+          // ⚠️ 必须找**整像素四邻都命中**的点，不能拿"扫到的第一个命中点"：
+          //    ① MouseEvent.clientX/Y 是整数（小数会被截断），拿边缘上的浮点坐标去派发事件，
+          //       截断后就落到抗锯齿的半透明像素上 → 判定翻转（本机实测踩过）；
+          //    ② 退化到"最边缘"也会让断言变成碰运气。
           var found = null
-          for (var dy = 0; dy < r.height && !found; dy += 4) {
-            for (var dx = 0; dx < r.width; dx += 4) {
-              if (callHit(r.left + dx, r.top + dy)) { found = { x: r.left + dx, y: r.top + dy }; break }
+          for (var dy = 4; dy < r.height && !found; dy += 4) {
+            for (var dx = 4; dx < r.width; dx += 4) {
+              var ix = Math.round(r.left + dx)
+              var iy = Math.round(r.top + dy)
+              if (callHit(ix, iy) && callHit(ix + 1, iy) && callHit(ix, iy + 1) && callHit(ix + 1, iy + 1)) {
+                found = { x: ix, y: iy }
+                break
+              }
             }
           }
           res.hitPoint = found
@@ -260,6 +275,34 @@ function main() {
       check('找到不透明命中点', !!probe.hitPoint, JSON.stringify(probe.hitPoint))
       check('空白处不命中', probe.hitAt0 === false, String(probe.hitAt0))
 
+      // 「点开的下拉弹层」算不算命中 —— 真 Chromium 的 elementFromPoint，
+      // jsdom 里的同款断言是桩出来的，覆盖不到真实命中行为。
+      // 背景：自绘下拉被 dshwDropOpen() 搬到 <body> 下，白名单漏了它就会出现
+      // "点选项点到下层"（HANDOVER-DESKTOP §21）。
+      const dropProbe = await overlayWin.webContents.executeJavaScript(`(function () {
+        var pt = { x: 340, y: 340 }
+        function callHit() {
+          try { return window.__dshwHitTest(pt.x, pt.y) } catch (e) { return 'THROW:' + ((e && e.message) || '') }
+        }
+        var before = callHit()
+        var m = document.createElement('div')
+        m.className = 'dshwv-rgbmenu dshwv-rgbopen'
+        m.style.cssText = 'position:fixed;left:300px;top:300px;width:120px;height:120px;background:#fff'
+        var o = document.createElement('div')
+        o.className = 'dshwv-rgbopt'
+        o.textContent = '纯色'
+        m.appendChild(o)
+        document.body.appendChild(m)
+        var on = callHit()
+        document.body.removeChild(m)
+        var after = callHit()
+        return { before: before, on: on, after: after }
+      })()`)
+      check('打开的下拉弹层算命中（点得动）', dropProbe.on === true,
+        `弹层前=${dropProbe.before} 弹层中=${dropProbe.on} 移除后=${dropProbe.after}`)
+      check('弹层移除后回到原判定（无死区）', dropProbe.after === dropProbe.before,
+        `前=${dropProbe.before} 后=${dropProbe.after}`)
+
       // 主触发源：主进程光标轮询 → IPC → 页面胶水，是否真的在跑
       await new Promise((r) => setTimeout(r, 400))
       const cursorCount = await overlayWin.webContents.executeJavaScript('window.__whaleGlueCursorCount || 0')
@@ -267,16 +310,32 @@ function main() {
 
       // 命中判定 → IPC → 主进程 setIgnore 的完整链路
       if (probe.hitPoint) {
-        lastIgnore = null
-        await overlayWin.webContents.executeJavaScript(
-          `window.dispatchEvent(new MouseEvent('mousemove',{clientX:${probe.hitPoint.x},clientY:${probe.hitPoint.y},bubbles:true})), 0`)
-        await new Promise((r) => setTimeout(r, 250))
-        check('移到鲸鱼上 → 取消穿透', lastIgnore === false, 'lastIgnore=' + lastIgnore)
+        // ⚠️ 这里不能"派发 → 睡 250ms → 读主进程状态"：**物理鼠标的真实 mousemove**
+        //    （forward:true 会把它们送进页面）会在等待期间把状态改写掉 —— 本机实测就是
+        //    "自检跑起来时用户正在动鼠标" → 断言随鼠标位置时灵时不灵（拿到 lastIgnore=null）。
+        //    改法：① 冻结光标轮询；② 派发与读回放在**同一个同步块**里（DOM 派发是同步的，
+        //    中间插不进别的任务）；③ 到主进程这一段只断言"IPC 消息数增加"（单调，干扰不了）。
+        //    附带诊断字段（src/xy/direct）是排查这类"判定为什么会变"用的，留着别删。
+        const circle = (x, y) => `(function () {
+          window.dispatchEvent(new MouseEvent('mousemove', { clientX: ${x}, clientY: ${y}, bubbles: true }))
+          return { hit: window.__whaleGlueHit, ignore: window.__whaleGlueIgnore, src: window.__whaleGlueLastSrc,
+                   xy: window.__whaleGlueLastXY, direct: (function () { try { return window.__dshwHitTest(${x}, ${y}) } catch (e) { return 'THROW' } })() }
+        })()`
+        freezeCursorPoll = true
+        const n0 = ignoreMsgCount
+        const onWhale = await overlayWin.webContents.executeJavaScript(circle(probe.hitPoint.x, probe.hitPoint.y))
+        check('移到鲸鱼上 → 胶水判定命中（不穿透）', onWhale.direct === true && onWhale.hit === true && onWhale.ignore === false,
+          JSON.stringify(onWhale))
+        await new Promise((r) => setTimeout(r, 150))
 
-        await overlayWin.webContents.executeJavaScript(
-          `window.dispatchEvent(new MouseEvent('mousemove',{clientX:2,clientY:2,bubbles:true})), 0`)
+        const onBlank = await overlayWin.webContents.executeJavaScript(circle(2, 2))
+        check('移到空白处 → 胶水判定未命中（恢复穿透）', onBlank.direct === false && onBlank.hit === false && onBlank.ignore === true,
+          JSON.stringify(onBlank))
         await new Promise((r) => setTimeout(r, 250))
-        check('移到空白处 → 恢复穿透', lastIgnore === true, 'lastIgnore=' + lastIgnore)
+        // 整段只断言"至少有一条 IPC"：盯单步是否发消息会被物理鼠标的同值去抖吃掉
+        // （那一步如果状态早就一样，胶水不会重复下发）。两步一合，必定至少切换一次。
+        check('判定结果 → IPC → 主进程（通道畅通）', ignoreMsgCount > n0, `整段收到 ${ignoreMsgCount - n0} 条 set-ignore`)
+        freezeCursorPoll = false
       }
     } catch (e) {
       check('自检执行异常', false, e && e.message)
@@ -394,7 +453,7 @@ function main() {
   // -------------------------------------------------------------------------
   // IPC
   // -------------------------------------------------------------------------
-  ipcMain.on('whale:set-ignore', (_e, ignore) => setIgnore(!!ignore))
+  ipcMain.on('whale:set-ignore', (_e, ignore) => { ignoreMsgCount++; setIgnore(!!ignore) })
   ipcMain.on('whale:log', (_e, msg) => flog('[renderer] ' + msg))
 
   // -------------------------------------------------------------------------
@@ -414,6 +473,9 @@ function main() {
     if (cursorTimer) return
     cursorTimer = setInterval(() => {
       if (!overlayWin || overlayWin.isDestroyed() || !overlayWin.isVisible()) return
+      // 自检期间冻结：物理鼠标位置会盖掉测试注入的合成 mousemove，
+      // 让「移到鲸鱼上→取消穿透」这类断言变成"看鼠标当时在哪"的碰运气（本机实测踩过）
+      if (freezeCursorPoll) return
       try {
         const b = overlayWin.getBounds()
         const p = screen.getCursorScreenPoint()

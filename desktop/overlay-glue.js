@@ -41,6 +41,9 @@
 
   function applyIgnore(v) {
     v = !!v
+    // 当前实际下发的穿透状态（供 --selftest 读取）。胶水有"同值去抖"，
+    // 自检要先知道记忆值才可能稳定地观察到一次切换。
+    window.__whaleGlueIgnore = v
     if (v === lastIgnore) return
     lastIgnore = v
     log('[glue] ignore=' + v + ' @' + Math.round(lastX) + ',' + Math.round(lastY) +
@@ -59,13 +62,18 @@
     }
   }
 
-  function evaluate(x, y) {
+  function evaluate(x, y, src) {
     if (typeof x !== 'number' || typeof y !== 'number' || !isFinite(x) || !isFinite(y)) return
     lastX = x
     lastY = y
     var h = hitTest(x, y)
     lastHit = h
     evalCount++
+    // 诊断快照（--selftest 读）：判定跑没跑、谁触发的、算了什么、结果是啥
+    window.__whaleGlueHit = h
+    window.__whaleGlueEvalCount = evalCount
+    window.__whaleGlueLastSrc = src || '?'
+    window.__whaleGlueLastXY = Math.round(x) + ',' + Math.round(y)
     // 只记启动期前 30 次：用来确认"判定到底跑没跑"。之后的持续信息由
     // applyIgnore() 的穿透切换日志承担，不必逐次刷屏（日志会长期留在用户机器上）。
     if (evalCount <= 30) {
@@ -88,7 +96,7 @@
     shell.onCursor(function (pt) {
       // 计数器供自检断言"轮询确实到达了页面"
       window.__whaleGlueCursorCount = (window.__whaleGlueCursorCount || 0) + 1
-      if (pt) evaluate(pt.x, pt.y)
+      if (pt) evaluate(pt.x, pt.y, 'poll')
     })
   } else {
     log('[glue] 警告：桥上没有 onCursor，只能依赖 mousemove 转发')
@@ -96,7 +104,8 @@
 
   // ② 本地 mousemove（次触发源）
   window.addEventListener('mousemove', function (e) {
-    evaluate(e.clientX, e.clientY)
+    window.__whaleGlueMoveCount = (window.__whaleGlueMoveCount || 0) + 1
+    evaluate(e.clientX, e.clientY, 'move')
   }, { passive: true, capture: true })
 
   // 按住期间锁死接管（拖拽不断线）；松开时按当前位置重算

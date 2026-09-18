@@ -10389,6 +10389,22 @@ loadSnapConfig()
 var busy = false
 var settleTimer = null
 var animDelayTimer = null
+// 点鲸鱼刷新后的「补一次」定时器：见 refresh() 里的说明
+var manualFollowTimer = null
+var MANUAL_FOLLOW_MS = 2500
+function scheduleManualFollow(attempt) {
+  attempt = attempt || 0
+  if (manualFollowTimer) { clearTimeout(manualFollowTimer); manualFollowTimer = null }
+  manualFollowTimer = setTimeout(function () {
+    manualFollowTimer = null
+    if (busy) {
+      // 上一轮请求还没回来：最多再等一次，别无限重排
+      if (attempt < 2) scheduleManualFollow(attempt + 1)
+      return
+    }
+    refresh(false)
+  }, MANUAL_FOLLOW_MS)
+}
 var drag = null
 var shown = null
 var animId = null
@@ -12221,6 +12237,12 @@ function artCenterAt(left, top, w, h, flipped) {
 function refresh(manual) {
   if (busy) return
   busy = true
+  // 点鲸鱼（manual）= 主动刷新：后端 balance.json?force=1 会顺带拉一次**当日官方账单**
+  // （平台侧 20s 冷却，见 lib/index.js maybeSyncTodayOfficial）。
+  // 但那次抓取是**非阻塞**的 —— 本轮响应里可能还是旧的今日值，
+  // 所以这里 2.5s 后再取一次（不带 force，纯本地缓存读取，不会多打平台请求），
+  // 把刚拉回来的今日账单显示出来；抓取失败/没配令牌时两次结果一样，用户无感。
+  if (manual) scheduleManualFollow()
   if (animDelayTimer) { clearTimeout(animDelayTimer); animDelayTimer = null }
   if (manual || state.balance === null) { state.status = 'loading'; render() }
   var ctrl = null
@@ -14197,6 +14219,12 @@ function isWhaleHit(e) {
 function onDocPointerDown(e) {
   if (e.target && e.target.closest) {
     if (e.target.closest('.dshwv-pop') || e.target.closest('.dshwv-menu-btn')) return
+    // 自绘下拉弹层（被搬到 <body> 下，不在任何面板内）：必须放行，
+    // 否则弹层恰好压在鲸鱼不透明像素上时，点选项会被当成"拖鲸鱼"吞掉。
+    if (e.target.closest('.dshwv-rgbmenu') || e.target.closest('.dshwv-rgbhead') ||
+        e.target.closest('.dshwv-rgbwrap') || e.target.closest('.dshwv-qcolwrap') ||
+        e.target.closest('.dshwv-fontwrap') || e.target.closest('.dshwv-custwrap') ||
+        e.target.closest('.dshwv-tplhelp')) return
     // 点击在面板/弹窗内部：交给面板自身逻辑处理
     if (e.target.closest('.dshwv-rolelist') || e.target.closest('.dshwv-audiolist') ||
         e.target.closest('.dshwv-cropmask') || e.target.closest('.dshwv-confirmmask') ||
@@ -14262,6 +14290,9 @@ function onDocClickStopper(e) {
   if (e.target && e.target.closest) {
     if (e.target.closest('.dshwv-pop') || e.target.closest('.dshwv-menu') || e.target.closest('.dshwv-menu-btn') ||
         e.target.closest('.dshwv-rolelist') || e.target.closest('.dshwv-cropmask') || e.target.closest('.dshwv-confirmmask') ||
+        e.target.closest('.dshwv-rgbmenu') || e.target.closest('.dshwv-rgbhead') || e.target.closest('.dshwv-rgbwrap') ||
+        e.target.closest('.dshwv-qcolwrap') || e.target.closest('.dshwv-fontwrap') || e.target.closest('.dshwv-custwrap') ||
+        e.target.closest('.dshwv-tplhelp') ||
         e.target.closest('.dshwv-audiolist') || e.target.closest('.dshwv-audiomask') ||
         e.target.closest('.dshwv-snapmask') || e.target.closest('.dshwv-bubmask') || e.target.closest('.dshwv-qedit') || e.target.closest('.dshwv-usagepanel') || e.target.closest('.dshwv-usage-mask') ||
         e.target.closest('.dshwv-resmask') ||
@@ -14286,6 +14317,9 @@ function onDocContextMenu(e) {
           e.target.closest('.dshwv-confirmmask') || e.target.closest('.dshwv-audiomask') || e.target.closest('.dshwv-snapmask') ||
           e.target.closest('.dshwv-bubmask') || e.target.closest('.dshwv-qedit') || e.target.closest('.dshwv-usagepanel') || e.target.closest('.dshwv-usage-mask') ||
           e.target.closest('.dshwv-resmask') ||
+          e.target.closest('.dshwv-rgbmenu') || e.target.closest('.dshwv-rgbhead') || e.target.closest('.dshwv-rgbwrap') ||
+          e.target.closest('.dshwv-qcolwrap') || e.target.closest('.dshwv-fontwrap') || e.target.closest('.dshwv-custwrap') ||
+          e.target.closest('.dshwv-tplhelp') ||
           e.target.closest('.dshwv-custmenu') || e.target.closest('.dshwv-custbtn')) return
     }
     if (!isWhaleHit(e)) return
@@ -14310,7 +14344,16 @@ function widgetUiHit(target) {
     target.closest('.dshwv-bubmask') || target.closest('.dshwv-qedit') || target.closest('.dshwv-usagepanel') ||
     target.closest('.dshwv-usage-mask') || target.closest('.dshwv-resmask') || target.closest('.dshwv-custmenu') ||
     target.closest('.dshwv-custbtn') || target.closest('.dshwv-rolebtn') || target.closest('.dshwv-audiobtn') ||
-    target.closest('.dshwv-roleimport') || target.closest('.dshwv-audioimport'))
+    target.closest('.dshwv-roleimport') || target.closest('.dshwv-audioimport') ||
+    // ⚠️ 桌面壳命脉：自绘下拉的弹层被 dshwDropOpen() **搬到 <body> 下**（fixed 定位，不再
+    // 属于原面板），若这里不认它 → 光标一进弹层就判"未命中" → 覆盖层整窗穿透 →
+    // 点选项=点到下层桌面的表现（用户实测：高峰色/空闲色/底色下拉点不动，2026-09-18）。
+    // .dshwv-rgbmenu 覆盖 rgbmenu/fontmenu/qcolmenu/custmenu 四种弹层，其余为触发钮/容器。
+    target.closest('.dshwv-rgbmenu') || target.closest('.dshwv-rgbopt') || target.closest('.dshwv-rgbhead') ||
+    target.closest('.dshwv-rgbwrap') || target.closest('.dshwv-qcolwrap') || target.closest('.dshwv-fontwrap') ||
+    // 挂在 body 上的说明弹层（「?」占位符说明 / 悬浮提示）同样会被 dshwDropOpen 式的
+    // fixed 定位搬到 body 下，不认它就同样"点不动、点到下层"
+    target.closest('.dshwv-custwrap') || target.closest('.dshwv-tplhelp'))
 }
 var touchDrag = null // 正在接管滚动的触摸(仅"起点命中鲸鱼"的那一次手势)
 // —— 移动端长按唤出菜单(v632):仅当开启「隐藏菜单按钮」时生效,替代电脑端的右键唤出 ——
@@ -14394,7 +14437,9 @@ function onDocPointerMoveCursor(e) {
   if (drag && drag.active) { setWidgetCursor('grabbing'); return }
   var el = null
   try { el = document.elementFromPoint(e.clientX, e.clientY) } catch (err) {}
-  if (el && el.closest && (el.closest('.dshwv-pop') || el.closest('.dshwv-menu') || el.closest('.dshwv-menu-btn') || el.closest('.dshwv-rolelist') || el.closest('.dshwv-cropmask') || el.closest('.dshwv-confirmmask') || el.closest('.dshwv-audiolist') || el.closest('.dshwv-audiomask') || el.closest('.dshwv-snapmask') || el.closest('.dshwv-bubmask') || el.closest('.dshwv-qedit') || el.closest('.dshwv-usagepanel') || el.closest('.dshwv-usage-mask') || el.closest('.dshwv-resmask') || el.closest('.dshwv-custmenu') || el.closest('.dshwv-custbtn'))) {
+  // 复用 widgetUiHit 的白名单（原先这里手抄了一份更短的清单，正是它漏掉了自绘下拉弹层
+  // .dshwv-rgbmenu → 悬停在弹层上时既不认命中、光标又显示 grab，干扰点击判定）
+  if (widgetUiHit(el)) {
     setWidgetCursor('')
     if (!menuBtnHide) menuBtn.classList.add('dshwv-menu-btn-visible')
     return

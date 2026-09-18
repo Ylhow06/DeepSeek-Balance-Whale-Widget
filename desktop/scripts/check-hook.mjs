@@ -32,8 +32,9 @@ const WIDGET = path.resolve(DESKTOP_DIR, '..', 'assets', 'whale-widget.js')
 const HTML = '<!doctype html><html><body><div id="root"><textarea class="fake-composer"></textarea></div></body></html>'
 
 let JSDOM
+let VirtualConsole
 try {
-  ({ JSDOM } = await import('jsdom'))
+  ({ JSDOM, VirtualConsole } = await import('jsdom'))
 } catch {
   console.error('缺少 jsdom。先执行：cd desktop && npm i -D jsdom')
   process.exit(2)
@@ -49,8 +50,15 @@ const check = (name, pass, extra) => {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 /** 起一个 jsdom，把挂件脚本真跑一遍，并记录它发出的所有 fetch URL */
-function runWidget(caps) {
-  const dom = new JSDOM(HTML, { url: 'http://127.0.0.1:3082/', runScripts: 'outside-only', pretendToBeVisual: true })
+function runWidget(caps, setup) {
+  // 静音 jsdom 的 "Not implemented"（Audio.play/pause 之类）：那是桩环境限制，
+  // 不是脚本错误，但混在输出里极易被误读成检查失败。页面自身的 console.* 照常打印。
+  const vc = new VirtualConsole()
+  // jsdom 新版把 sendTo 改名成了 forwardTo；`omitJSDOMErrors`（旧）/ `jsdomErrors:'none'`（新）都兜一下
+  const opts = { omitJSDOMErrors: true, jsdomErrors: 'none' }
+  if (typeof vc.forwardTo === 'function') vc.forwardTo(console, opts)
+  else if (typeof vc.sendTo === 'function') vc.sendTo(console, opts)
+  const dom = new JSDOM(HTML, { url: 'http://127.0.0.1:3082/', runScripts: 'outside-only', pretendToBeVisual: true, virtualConsole: vc })
   const w = dom.window
   const d = w.document
   const calls = []
@@ -87,6 +95,7 @@ function runWidget(caps) {
   }
   w.scrollTo = () => {}
   if (caps) w.__dshwShellCaps = caps
+  if (setup) setup(w, d)
 
   let evalErr = ''
   try { w.eval(src) } catch (e) { evalErr = (e && e.name) + ': ' + (e && e.message) }
@@ -203,6 +212,89 @@ lines.push('（场景 B 实际发出的请求：' + (sample.join(', ') || '无')
   check('新增模型面板确实打开了', allTxt.indexOf('新增模型') !== -1,
     'mask数=' + masks.length + ' 末个=[' + cardTxt.slice(0, 20) + ']')
   try { C.w.close() } catch {}
+}
+
+// -------------------------------- 弹出下拉（被搬到 body 的弹层）必须算作命中
+// 踩过一次：dshwDropOpen() 把自绘下拉搬到 <body> 下（fixed，避免被滚动容器裁剪），
+// 而命中白名单 widgetUiHit() 里只列了「面板内」的元素 → 光标一进弹层就判未命中 →
+// 覆盖层整窗穿透 → 点选项"点到下层"，下拉框像坏了一样（用户实测截图 2026-09-18）。
+// 这里用手工构造的弹层断言白名单契约（真实弹层同样是 .dshwv-rgbmenu > .dshwv-rgbopt）。
+{
+  const D = runWidget({ dshSessionEvents: false, host: 'standalone' })
+  await sleep(60)
+
+  const mkMenu = (hidden) => {
+    const m = D.d.createElement('div')
+    m.className = 'dshwv-rgbmenu dshwv-qcolmenu' + (hidden ? '' : ' dshwv-rgbopen')
+    m.style.position = 'fixed'
+    m.style.left = '0px'
+    m.style.top = '0px'
+    m.style.width = '120px'
+    m.style.height = '120px'
+    const o = D.d.createElement('div')
+    o.className = 'dshwv-rgbopt'
+    o.textContent = '✓ 纯色'
+    m.appendChild(o)
+    D.d.body.appendChild(m)
+    return o
+  }
+  const hitWith = (el) => {
+    D.d.elementFromPoint = () => el
+    try { return D.w.__dshwHitTest(400, 400) } catch (e) { return 'THROW:' + e.message }
+  }
+
+  const openOpt = mkMenu(false)
+  check('D/打开的下拉弹层（位于 body 下）判定命中', hitWith(openOpt) === true, String(hitWith(openOpt)))
+  // 「?」占位符说明/悬浮提示浮层：同样挂在 body 下，同样是可点浮层
+  const help = D.d.createElement('div')
+  help.className = 'dshwv-tplhelp'
+  help.style.display = 'block'
+  D.d.body.appendChild(help)
+  check('D/「?」说明浮层（位于 body 下）判定命中', hitWith(help) === true, String(hitWith(help)))
+  // 对照组 1：同一位置的普通 body 元素 → 必须未命中（否则整屏变"看不见却吃鼠标"的死区）
+  const plain = D.d.createElement('div')
+  D.d.body.appendChild(plain)
+  check('D/对照组：普通元素未命中', hitWith(plain) === false, String(hitWith(plain)))
+  // 对照组 2：关着的弹层（display:none）→ 未命中
+  const hid = mkMenu(true)
+  check('D/对照组：关闭态弹层未命中', hitWith(hid) === false, String(hitWith(hid)))
+  try { D.w.close() } catch {}
+}
+
+// ---------------------- 点鲸鱼：余额强制刷新一次 + 2.5s 后补取一次（当天官方账单）
+// 契约：点鲸鱼 → balance.json?force=1（后端顺带拉当日官方账单，平台侧 20s 冷却）
+//       → 2.5s 后再取一次**不带 force** 的 balance.json，把刚拉到的今日账单显示出来。
+// 真点鲸鱼需要 isWhaleHit 为真：jsdom 里命中图加载不出来，这里让 probe 走 onerror
+// （命中判定退回图像矩形），并把 .dshwv-img 的矩形桩成非零值。
+{
+  const RECT = { left: 900, top: 700, right: 1500, bottom: 1300, width: 600, height: 600, x: 900, y: 700 }
+  const E = runWidget({ dshSessionEvents: false, host: 'standalone' }, (w) => {
+    class FakeImage {
+      constructor() { this.onload = null; this.onerror = null; this.width = 610; this.height = 610 }
+      set src(v) { this._src = v; setTimeout(() => { try { this.onerror && this.onerror() } catch (e) {} }, 0) }
+      get src() { return this._src }
+    }
+    w.Image = FakeImage
+    w.Element.prototype.getBoundingClientRect = function () {
+      if (this.classList && this.classList.contains('dshwv-img')) return RECT
+      return { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0, x: 0, y: 0 }
+    }
+  })
+  await sleep(120)
+  const mk = (type, x, y) => new E.w.MouseEvent(type, { clientX: x, clientY: y, bubbles: true, cancelable: true, button: 0 })
+  const base = E.calls.length
+  E.d.dispatchEvent(mk('pointerdown', 1200, 1000))
+  E.d.dispatchEvent(mk('pointerup', 1200, 1000))
+  await sleep(60)
+  const afterClick = E.calls.slice(base)
+  check('E/点鲸鱼 → 余额强制刷新（force=1）', afterClick.some((u) => u.indexOf('balance.json?force=1') !== -1),
+    afterClick.join(', ') || '没有发出任何 balance 请求')
+  await sleep(3000)
+  const afterFollow = E.calls.slice(base)
+  check('E/点鲸鱼后补取一次今日账单（无 force 的第二次）',
+    afterFollow.filter((u) => u.indexOf('balance.json') !== -1).length >= 2 && afterFollow.some((u) => u.indexOf('balance.json') !== -1 && u.indexOf('force=1') === -1),
+    afterFollow.filter((u) => u.indexOf('balance.json') !== -1).join(', '))
+  try { E.w.close() } catch {}
 }
 
 console.log('===== 挂件桌面集成检查（jsdom 离线）=====')

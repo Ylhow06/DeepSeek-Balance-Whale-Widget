@@ -44,7 +44,7 @@ git push origin desktop
 | 文件 | 我方改动 | 定位我方代码的关键词 |
 |---|---|---|
 | `lib/index.js` | +527 | `officialTodayRecord`、`platformTokenSet`、`API_BUILTIN_ID` 守卫、`usageSource = offToday`；另有你自己的官方消费历史（约 +498） |
-| `assets/whale-widget.js` | +688 | `HAS_SESSION_EVENTS`、`__dwhHitTest`→`__dshwHitTest`、`fitBubbleText`、`isBuiltin`、`apiTodayMoneyText`、`apiNoBalanceLabel` |
+| `assets/whale-widget.js` | +688 | `HAS_SESSION_EVENTS`、`__dwhHitTest`→`__dshwHitTest`、`fitBubbleText`、`isBuiltin`、`apiTodayMoneyText`、`apiNoBalanceLabel`、`scheduleManualFollow`、`widgetUiHit` 白名单里的 `.dshwv-rgbmenu` 一族 |
 | `.gitignore` | +30 | `desktop/build`、`desktop/dist`、`desktop/.build`、`desktop/node_modules`、`standalone/config.json` |
 
 **基本不会冲突**：`desktop/`、`standalone/` 整个目录、`HANDOVER.md`、`HANDOVER-DESKTOP.md`（都是我方新增，上游没有）。
@@ -55,14 +55,26 @@ git push origin desktop
 > （它要调用挂件内部的 `isWhaleHit`/`widgetUiHit`）。合并时若这段被覆盖，
 > 表现是"点鲸鱼没反应、点击总是落到下层"，且日志里只有 `hit=null`。
 > 详见 HANDOVER-DESKTOP §12.2 / §13.3。
+>
+> ⚠️ 同样必须保住的还有 **`widgetUiHit()` 的白名单**（`assets/whale-widget.js`，函数在
+> `dshwInit` 内部，`__dshwHitTest` 依赖它）。上游的自绘下拉会被 `dshwDropOpen()`
+> **搬到 `<body>` 下**（fixed 定位），因此白名单里必须包含这些**面板外**的浮层类名：
+> `.dshwv-rgbmenu` / `.dshwv-rgbopt` / `.dshwv-rgbhead` / `.dshwv-rgbwrap` /
+> `.dshwv-qcolwrap` / `.dshwv-fontwrap` / `.dshwv-custwrap` / `.dshwv-tplhelp`。
+> 少了就是"下拉框点不动、点选项点到下层"（2026-09-18 实测，见 HANDOVER-DESKTOP §21）。
+> **`check:hook` 的 D 组断言专门守这条**，合并后必跑。
+>
+> ⚠️ 另有一处**桌面端自己加的**前端逻辑，合并时别被上游版本盖掉：
+> `refresh()` 开头的 `if (manual) scheduleManualFollow()`（点鲸鱼 2.5s 后补取一次今日账单）。
 
 ## 合并后必做验证（别省）
 
 ```powershell
-# 1) 开发期自检：jsdom 离线跑真脚本，14+ 条断言
+# 1) 开发期自检：jsdom 离线跑真脚本，22 条断言
 cd desktop && npm run check:hook
 ```
-覆盖：钩子作用域（防"永远穿透"）、无/有 caps 双场景 gating、气泡居中补偿矩阵、点「+ 添加模型」能开面板。
+覆盖：钩子作用域（防"永远穿透"）、无/有 caps 双场景 gating、气泡居中补偿矩阵、点「+ 添加模型」能开面板、
+**打开的下拉/说明浮层必须命中（含对照组）**、**点鲸鱼 → force=1 + 2.5s 补取一次今日账单**。
 
 ```powershell
 # 2) 起一次独立薄壳，确认核心 lib 没被合并弄坏

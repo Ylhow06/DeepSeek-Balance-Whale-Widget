@@ -1112,3 +1112,135 @@ balance.json: ok=true 余额=16.89 今日=5.82
 - 同目录下的其它文件都是正常数据：`.dshw-official.json`（官方账单缓存，会随日期增长）、
   `.dshw-usage.json`（用量账本）、`.dshw-size.json`（挂件尺寸/位置）、`.dshw-bubble.json`（泡泡配置）。
 
+---
+
+## 21. 自绘下拉「点不动、点到下层」（2026-09-18 第七轮）
+
+用户实测反馈：「这个下拉框点击不了，会点到下层」（截图：泡泡模块编辑面板里的**高峰色/空闲色/底色**下拉，
+弹层已经正常画出来了，就是点选项没反应）。
+
+### 21.1 根因：弹层被搬到 `<body>` 下，而命中白名单只认"面板内的元素"
+
+`dshwDropOpen()`（`assets/whale-widget.js:8531`）为了不被滚动容器裁剪，会做两件事：
+
+```js
+if (menuEl.parentNode !== document.body) document.body.appendChild(menuEl)  // ← 搬到 body
+menuEl.style.position = 'fixed'                                             // ← 改成 fixed
+```
+
+于是**打开的下拉弹层不再是任何面板的子节点**，而桌面壳的命中判定 `widgetUiHit()`
+（`__dshwHitTest` → `overlay-glue.js` → `setIgnoreMouseEvents`）用的是**类名白名单**，
+当时白名单里只有 `.dshwv-custmenu`，**没有 `.dshwv-rgbmenu`**：
+
+| 挂件里的四种自绘下拉 | 弹层类名 | 白名单里有没有 |
+|---|---|---|
+| `dshwCustSel()`（原生 select 替代，任务结束音等） | `.dshwv-rgbmenu.dshwv-custmenu` | ✅ 有（所以这些下拉一直是好的） |
+| `qColorSelectBuild()`（高峰色/空闲色/底色） | `.dshwv-rgbmenu.dshwv-qcolmenu` | ❌ **漏** ← 用户截到的就是这个 |
+| `bubbleRgbSelect()`（泡泡配色） | `.dshwv-rgbmenu` | ❌ 漏 |
+| `bubbleFontSelect()`（字体） | `.dshwv-rgbmenu.dshwv-fontmenu` | ❌ 漏 |
+
+后果链条（与用户描述完全一致）：
+**光标移进弹层 → 判定未命中 → glue 下发 `setIgnoreMouseEvents(true)` → 覆盖层整窗穿透 → 点击落到下层桌面。**
+
+> 这是与 §12/§13 同一条链路上的**第三类**故障，排查时按这个顺序分：
+> ① 判定有没有跑（`hit=null` = 钩子作用域坏，§13）；② 判定对不对（几何/白名单，本节）；
+> ③ 系统层面有没有生效（托盘「强制接管」能验，§12.4）。
+
+### 21.2 修法
+
+1. `widgetUiHit()` 白名单补上**被搬到 body 的浮层**：`.dshwv-rgbmenu`（覆盖四种弹层）、
+   `.dshwv-rgbopt`、`.dshwv-rgbhead`、`.dshwv-rgbwrap`、`.dshwv-qcolwrap`、`.dshwv-fontwrap`、
+   `.dshwv-custwrap`、**`.dshwv-tplhelp`**（「?」占位符说明/悬浮提示，同样是 body 级浮层，同一类漏网）。
+2. 另外三处「吞事件」的豁免清单（`onDocPointerDown` / `onDocClickStopper` / `onDocContextMenu`）同步补齐 ——
+   否则弹层恰好压在鲸鱼不透明像素上时，点选项会被当成"拖鲸鱼"吞掉。
+3. `onDocPointerMoveCursor()` 里**手抄的短清单删掉，改为复用 `widgetUiHit(el)`** ——
+   白名单在 5 个地方各抄一份正是这次漏项的土壤。
+
+### 21.3 回归测试（`check:hook` 新增 5 条断言）
+
+先写失败断言确认根因，再修（**修复前后对照**）：
+
+| 断言 | 修复前 | 修复后 |
+|---|---|---|
+| D/打开的下拉弹层（位于 body 下）判定命中 | **FAIL** `[false]` | PASS `[true]` |
+| D/「?」说明浮层（位于 body 下）判定命中 | — | PASS `[true]` |
+| D/对照组：普通元素未命中 | PASS `[false]` | PASS `[false]` |
+| D/对照组：关闭态弹层未命中 | PASS `[false]` | PASS `[false]` |
+| E/点鲸鱼 → 余额强制刷新（`force=1`） | — | PASS `[/dsh-whale/balance.json?force=1]` |
+| E/点鲸鱼后补取一次今日账单（无 force 的第二次） | — | PASS `[…?force=1, …/balance.json]` |
+
+两个对照组是刻意留的：它们证明这套断言**不是"永远 PASS"的假测试**，
+同时守住"宁可鲸鱼点不动，也不能把整块屏幕变成看不见却吃鼠标的死区"这条底线。
+
+E 组是真点鲸鱼：jsdom 里命中图加载不出来，所以让 `new Image()` 的探针走 `onerror`
+（命中判定退回图像矩形），再把 `.dshwv-img` 的矩形桩成非零值，然后派发 `pointerdown/pointerup`
+走完 `endDrag → whaleClick() + refresh(true)` 这条真实链路。
+
+### 21.4 顺带确认：点鲸鱼刷余额 + 拉今日账单（20s 冷却）
+
+这条**本来就有**，本轮补的是"让它当场可见"：
+
+- 点鲸鱼 → `refresh(true)` → `balance.json?force=1`；
+- 后端（`lib/index.js:2857-2859`）见到 `force=1` 才 `maybeSyncTodayOfficial()`，
+  平台侧下限 **20s**（`OFFICIAL_TODAY_SYNC_MIN_MS`），连点也不会把平台打爆；
+  自动轮询（每 60s，无 force）**不拉**。
+- ⚠️ 那次抓取是**非阻塞**的（响应先用缓存里的旧值），所以前端加了
+  `scheduleManualFollow()`：点完 **2.5s 后再取一次**（不带 force，纯本地缓存读取，不多打平台请求），
+  把刚拉回来的今日账单显示出来。没配平台令牌时两次结果一样，用户无感。
+
+### 21.5 怎么验（本轮）
+
+```powershell
+cd desktop
+npm run check:hook          # 22 条断言全绿（含上面的 D/E 组）
+npm start                   # 真机看一眼：面板里高峰色/空闲色下拉能不能点选项
+```
+
+### 21.6 真机自检（`--selftest`）的两条断言原先是不稳定的 —— 本轮查清并修稳
+
+第一次在真机上跑自检时，`移到鲸鱼上 → 取消穿透` / `移到空白处 → 恢复穿透` 两条都报
+`lastIgnore=null`。**不是这次改动弄坏的**，是这两条断言本身「看运气」。逐层取证的结论：
+
+| 现象（诊断字段） | 结论 |
+|---|---|
+| `{"move":96,"eval":126,"hit":false,"src":"move","xy":"863,810"}` | 最后一次判定来自 `move`，坐标却是 **863,810**（不是注入的 1857,917）→ **是用户物理鼠标的真实 mousemove** 把注入事件盖掉了。`forward:true` 的穿透窗仍会把真实 mousemove 送进页面，这是设计如此。 |
+| `{"hit":false,"direct":true,"xy":"1857,917"}` | 同一坐标，直接调钩子是 `true`，胶水算出来是 `false` → **`MouseEvent.clientX` 是整数**（小数被截断），而旧探针"扫到的第一个命中点"恰好在鲸鱼抗锯齿边缘上 → 截断 0.1px 就翻到半透明像素。 |
+| 单步断言"IPC 通道畅通"收到 0 条 | 胶水/主进程都有**同值去抖**：状态没变就不会重复下发，所以单步断言也会时灵时不灵。 |
+
+改法（都在本轮）：
+1. **探针改找"整像素四邻都命中"的点**（`callHit(ix,iy)` 与 `(ix+1,iy)`/`(ix,iy+1)`/`(ix+1,iy+1)` 全真才采纳），
+   拿到的就是整数坐标，注入事件不再被截断偏移；
+2. **派发与读回放进同一个 `executeJavaScript` 同步块** —— DOM 派发是同步的，物理鼠标的任务插不进来；
+3. 到主进程那一段**只断言"整段至少有一条 set-ignore"**（两步一合必有一次状态切换，单调量干扰不了），
+   不再盯单步；
+4. 自检期间 `freezeCursorPoll = true` 冻结 33ms 光标轮询（否则轮询也会覆盖注入事件）；
+5. 胶水补 4 个只读诊断量（`__whaleGlueHit` / `__whaleGlueLastSrc` / `__whaleGlueLastXY` /
+   `__whaleGlueIgnore`）+ `__whaleGlueEvalCount` —— 就是靠它们一层层定位到"物理鼠标"的，留着别删。
+
+结果（真机，连续两次）：**21 条断言全 PASS，`RESULT=OK`，退出码 0**。其中新增的关键一条：
+```
+PASS  打开的下拉弹层算命中（点得动）  [弹层前=false 弹层中=true 移除后=false]
+PASS  移到鲸鱼上 → 胶水判定命中（不穿透）  [{"hit":true,"ignore":false,"src":"move","xy":"1861,917","direct":true}]
+PASS  判定结果 → IPC → 主进程（通道畅通）  [整段收到 2 条 set-ignore]
+```
+
+### 21.7 想"正式版开着的时候跑自检"：用 `WHALE_USER_DATA` 换个目录
+
+单实例锁就落在 userData 下，所以正式版在跑时再启动一个实例会被锁直接挡掉 ——
+**表现为秒退、退出码 0、什么报告都没有**（本轮就踩了：用户装着正式版在跑，自检跑了个寂寞）。
+`main.js` 现在支持环境变量覆盖：
+
+```powershell
+$env:WHALE_USER_DATA = "$env:TEMP\whale-selftest-profile"
+Remove-Item Env:ELECTRON_RUN_AS_NODE      # 宿主预设的，会让 electron 退化成纯 Node
+& .\node_modules\electron\dist\electron.exe . --selftest
+# 报告：$env:TEMP\whale-desktop-selftest.txt
+```
+
+> 另：本机 `node_modules/electron/dist/electron.exe` 一度不存在（npm 拦了 postinstall），
+> 而 `node install.js` 会联网失败。**不必重下** —— 二进制早在缓存里：
+> `%LOCALAPPDATA%\electron\Cache\<hash>\electron-v44.3.0-win32-x64.zip`，
+> 直接 `Expand-Archive` 到 `node_modules/electron/dist`，再写一个内容为 `electron.exe` 的 `path.txt` 即可。
+
+
+
