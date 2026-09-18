@@ -1263,8 +1263,10 @@ npx electron-builder --win nsis --config electron-builder.yml   # 安装版，�
 
 产物（2026-09-18 实测）：
 ```
-dist\小鲸鱼-0.1.0-便携版.exe   100.2 MB
-dist\小鲸鱼-0.1.0-安装版.exe   111.3 MB
+dist\小鲸鱼-0.1.0-便携版.exe   100.2 MB   ← 挂镜像后第一次打包成功（3m21s）
+dist\小鲸鱼-0.1.0-安装版.exe   111.3 MB   ← 1m19s
+dist\小鲸鱼-0.1.1-便携版.exe   100.2 MB   ← 发行版（下拉修复 + 补取今日账单）
+dist\小鲸鱼-0.1.1-安装版.exe   111.3 MB
 ```
 
 两点经验：

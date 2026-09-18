@@ -113,3 +113,7 @@ npm run build
   全部在 `desktop` 分支上；另留了 `backup/pre-split` 备份分支指向 `d6113da`。
 - `README.md` 已回退为上游原版（桌面端用法改写在 Release 说明里）。
 - 发行标记 `v0.1.0-desktop` 指向 `d6113da`（在 desktop 分支上）。
+- **v0.1.1 发行（2026-09-18）**：`desktop/package.json` 版本 → 0.1.1，
+  带下拉弹层修复与「点鲸鱼补取今日账单」；发行标记 `v0.1.1-desktop`，
+  产物 `desktop/dist/小鲸鱼-0.1.1-{便携版,安装版}.exe`。
+  ⚠️ 版本号只写 `desktop/package.json`（+ lock），**根 package.json 是上游插件版本，别动**。

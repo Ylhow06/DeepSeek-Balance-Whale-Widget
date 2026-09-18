@@ -1,7 +1,7 @@
 {
   "name": "whale-desktop",
   "productName": "小鲸鱼",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "DeepSeek 小鲸鱼挂件的 Windows 桌面宠物壳（Electron 全屏透明覆盖层）",
   "type": "module",
